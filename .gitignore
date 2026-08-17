@@ -10,7 +10,8 @@ __pycache__/
 venv/
 
 # Experiment outputs
-sam2_logs/
+# Unanchored rules apply to every backbone directory.
+*_logs/
 outputs/
 results/
 logs/
@@ -30,9 +31,9 @@ checkpoints/*.safetensors
 *.safetensors
 
 # Local working material
-work/
+/work/
 
 # Build artifacts
 build/
 dist/
-sam2/_C.*
+/sam2/_C.*
