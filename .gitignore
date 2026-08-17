@@ -1,0 +1,38 @@
+# IDE
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Experiment outputs
+sam2_logs/
+outputs/
+results/
+logs/
+wandb/
+tmp/
+
+# Data and model weights
+data/
+datasets/
+checkpoints/*.pt
+checkpoints/*.pth
+checkpoints/*.ckpt
+checkpoints/*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Local working material
+work/
+
+# Build artifacts
+build/
+dist/
+sam2/_C.*
