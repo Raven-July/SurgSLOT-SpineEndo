@@ -1,0 +1,244 @@
+# @package _global_
+
+defaults:
+  - datasets/surgslot_sam3_sasv
+  - _self_
+
+scratch:
+  resolution: 672
+  train_batch_size: 4
+  num_train_workers: 10
+  num_frames: 10
+  max_num_objects: 2
+  base_lr: 1.0e-5
+  vision_lr: 5.0e-6
+  phases_per_epoch: 1
+  num_epochs: 60
+  use_tissue_text: false
+  cls_pretrained_epoch: 0
+  compute_consistency_loss: true   # more params specify in the loss config section
+  use_cls_tokens: true
+  use_long_mem_tpos_enc: true
+  num_init_long_mem_frames: 2
+
+paths:
+#  checkpoint: ${oc.env:SAM3_CHECKPOINT,./checkpoints/sam3.pt}
+  checkpoint: /mnt/data0/haofeng/project/SurgicalSAM3/checkpoints/sam3.pt
+
+launcher:
+  num_nodes: 1
+  gpus_per_node: 1
+  # Use the GPUs exposed through CUDA_VISIBLE_DEVICES. Automatic free-memory
+  # polling is disabled because it can wait forever on 48 GB cards.
+  find_gpu_memory: 40000
+  experiment_log_dir: ${oc.env:SURGSLOT_TRAIN_OUTPUT,./outputs/surgslot-sam3/train/surgslot_sam3_sasv}
+
+vos:
+  train_transforms:
+    - _target_: training.dataset.transforms.ComposeAPI
+      transforms:
+        - _target_: training.dataset.transforms.RandomHorizontalFlip
+          consistent_transform: True
+        - _target_: training.dataset.transforms.RandomAffine
+          degrees: 25
+          shear: 20
+          image_interpolation: bilinear
+          consistent_transform: True
+        - _target_: training.dataset.transforms.RandomResizeAPI
+          sizes: ${scratch.resolution}
+          square: true
+          consistent_transform: True
+        - _target_: training.dataset.transforms.ColorJitter
+          consistent_transform: True
+          brightness: 0.1
+          contrast: 0.03
+          saturation: 0.03
+          hue: null
+        - _target_: training.dataset.transforms.RandomGrayscale
+          p: 0.05
+          consistent_transform: True
+        - _target_: training.dataset.transforms.ColorJitter
+          consistent_transform: False
+          brightness: 0.1
+          contrast: 0.05
+          saturation: 0.05
+          hue: null
+        - _target_: training.dataset.transforms.ToTensorAPI
+        - _target_: training.dataset.transforms.NormalizeAPI
+          mean: [0.5, 0.5, 0.5]
+          std: [0.5, 0.5, 0.5]
+
+trainer:
+  _target_: training.trainer.Trainer
+  mode: train_only
+  max_epochs: ${times:${scratch.num_epochs},${scratch.phases_per_epoch}}
+  accelerator: cuda
+  seed_value: 2024
+
+  model:
+    _target_: training.model.sam3_train.SAM3Train
+    image_size: ${scratch.resolution}
+    num_maskmem: 7
+    checkpoint_path: ${paths.checkpoint}
+
+    ####### Training specific params (follow SAM2 MOSE finetune exactly) #######
+    # box/point input and corrections
+    prob_to_use_pt_input_for_train: 0.5
+    prob_to_use_pt_input_for_eval: 0.0
+    prob_to_use_box_input_for_train: 0.5   # 0.5*0.5 = 0.25 prob to use box
+    prob_to_use_box_input_for_eval: 0.0
+    prob_to_sample_from_gt_for_train: 0.1
+    num_frames_to_correct_for_train: 1     # iteratively sample on random 1~2 frames
+    num_frames_to_correct_for_eval: 1
+    rand_frames_to_correct_for_train: true # random #init-cond-frame ~ 2
+    rand_frames_to_correct_for_eval: false
+    add_all_frames_to_correct_as_cond: true
+    # maximum 2 initial conditioning frames
+    num_init_cond_frames_for_train: 1
+    num_init_cond_frames_for_eval: 1
+    rand_init_cond_frames_for_train: true  # random 1~2
+    rand_init_cond_frames_for_eval: false
+    num_correction_pt_per_frame: 7
+    prob_to_dropout_spatial_mem: 0.0
+    forward_backbone_per_frame_for_eval: true
+    use_cls_tokens: ${scratch.use_cls_tokens}
+    use_tissue_text: ${scratch.use_tissue_text}
+    use_long_mem_tpos_enc: ${scratch.use_long_mem_tpos_enc}
+    num_init_long_mem_frames: ${scratch.num_init_long_mem_frames}
+
+    ####### Freeze strategy #######
+    freeze_image_encoder: false
+    freeze_patterns:
+      - 'backbone.vision_backbone.trunk.patch_embed.*'
+      - 'backbone.vision_backbone.trunk.pos_embed'
+      - 'backbone.vision_backbone.trunk.ln_pre.*'
+      - 'backbone.vision_backbone.trunk.blocks.0.*'
+      - 'backbone.vision_backbone.trunk.blocks.1.*'
+      - 'backbone.vision_backbone.trunk.blocks.2.*'
+      - 'backbone.vision_backbone.trunk.blocks.3.*'
+      - 'backbone.vision_backbone.trunk.blocks.4.*'
+      - 'backbone.vision_backbone.trunk.blocks.5.*'
+      - 'backbone.vision_backbone.trunk.blocks.6.*'
+      - 'backbone.vision_backbone.trunk.blocks.7.*'
+      - 'backbone.vision_backbone.trunk.blocks.8.*'
+      - 'backbone.vision_backbone.trunk.blocks.9.*'
+      - 'backbone.vision_backbone.trunk.blocks.10.*'
+      - 'backbone.vision_backbone.trunk.blocks.11.*'
+      - 'backbone.vision_backbone.trunk.blocks.12.*'
+      - 'backbone.vision_backbone.trunk.blocks.13.*'
+      - 'backbone.vision_backbone.trunk.blocks.14.*'
+      - 'backbone.vision_backbone.trunk.blocks.15.*'
+      - 'backbone.vision_backbone.trunk.blocks.16.*'
+      - 'backbone.vision_backbone.trunk.blocks.17.*'
+      - 'backbone.vision_backbone.trunk.blocks.18.*'
+      - 'backbone.vision_backbone.trunk.blocks.19.*'
+      - 'backbone.vision_backbone.trunk.blocks.20.*'
+      - 'backbone.vision_backbone.trunk.blocks.21.*'
+      - 'backbone.vision_backbone.trunk.blocks.22.*'
+      - 'backbone.vision_backbone.trunk.blocks.23.*'
+      - "maskmem_backbone.*"          # memory encoder (SimpleMaskEncoder + mask_downsampler)
+      - "no_obj_embed_spatial"        # per-slot empty object embedding
+      - "output_valid_embed"          # per-slot suppression embedding (valid)
+      - "output_invalid_embed"        # per-slot suppression embedding (invalid)
+
+  optim:
+    amp:
+      enabled: true
+      amp_dtype: bfloat16
+
+    optimizer:
+      _target_: torch.optim.AdamW
+
+    gradient_clip:
+      _target_: training.optimizer.GradientClipper
+      max_norm: 0.1
+      norm_type: 2
+
+    param_group_modifiers:
+      - _target_: training.optimizer.layer_decay_param_modifier
+        _partial_: True
+        layer_decay_value: 0.9
+        apply_to: 'backbone.vision_backbone.trunk'
+        overrides:
+          - pattern: '*pos_embed*'
+            value: 1.0
+
+    options:
+      lr:
+        - scheduler:
+            _target_: utils.lr_scheduler.LinearWarmupCosineParamScheduler
+            start_value: ${scratch.base_lr}
+            end_value: ${divide:${scratch.base_lr},10}
+            warmup_duration: 0.1
+        - scheduler:
+            _target_: utils.lr_scheduler.LinearWarmupCosineParamScheduler
+            start_value: ${scratch.vision_lr}
+            end_value: ${divide:${scratch.vision_lr},10}
+            warmup_duration: 0.1
+          param_names:
+            - 'backbone.*'
+
+
+      weight_decay:
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+            value: 0.1
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+            value: 0.0
+          param_names:
+            - '*bias*'
+          module_cls_names: ['torch.nn.LayerNorm']
+
+  loss:
+    all:
+      _target_: training.loss_fns_slot.MultiStepMultiMasksAndIous
+      weight_dict:
+        loss_mask: 20
+        loss_dice: 1
+        loss_iou: 1
+        loss_class: 1
+        loss_cls: 1
+        loss_consistency: 1
+        loss_repulsion: 1
+      repulsion_iou_thr: 0.1
+      repulsion_margin: 0.1
+      consistency_margin: 0.7
+      confidence_cls: 0.7
+      compute_consistency_loss: ${scratch.compute_consistency_loss}
+      supervise_all_iou: true
+      iou_use_l1_loss: true
+      pred_obj_scores: true
+      focal_gamma_obj_score: 0.0
+      focal_alpha_obj_score: -1.0
+      use_cls_tokens: ${scratch.use_cls_tokens}
+      cls_pretrained_epoch: ${scratch.cls_pretrained_epoch}
+
+  distributed:
+    backend: nccl
+    find_unused_parameters: True
+
+  logging:
+    tensorboard_writer:
+      _target_: training.utils.logger.make_tensorboard_logger
+      log_dir: ${launcher.experiment_log_dir}/tensorboard
+      flush_secs: 120
+      should_log: true
+    log_dir: ${launcher.experiment_log_dir}/logs
+    log_freq: 10
+
+  checkpoint:
+    save_dir: ${launcher.experiment_log_dir}/checkpoints
+    save_freq: 10
+
+# SLURM args if running on a cluster
+submitit:
+  partition: null
+  account: null
+  qos: null
+  cpus_per_task: 10
+  use_cluster: false
+  timeout_hour: 24
+  name: null
+  port_range: [10000, 65000]
+

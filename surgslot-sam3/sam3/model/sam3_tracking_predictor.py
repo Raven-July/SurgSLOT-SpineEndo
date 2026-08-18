@@ -3,11 +3,15 @@
 # pyre-unsafe
 
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 import torch
+import torch.nn.functional as F
 from sam3.model.sam3_tracker_base import concat_points, NO_OBJ_SCORE, Sam3TrackerBase
-from sam3.model.sam3_tracker_utils import fill_holes_in_mask_scores
+from sam3.model.sam3_tracker_utils import (
+    fill_holes_in_mask_scores,
+    select_closest_cond_frames,
+)
 from sam3.model.utils.sam2_utils import load_video_frames
 from tqdm.auto import tqdm
 
@@ -36,16 +40,58 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         # - if it's set to 0 or negative, this option is turned off and we use all points in the prompt encoder
         max_point_num_in_prompt_enc=16,
         non_overlap_masks_for_output=True,
+        apply_postprocessing=False,
+        apply_long_mem=False,
+        num_long_mem_frame=3,
+        num_long_mem_candidate=5,
+        long_mem_iou_thr=0.95,
+        use_cls_inference=False,
+        use_continuous_divemem=False,
+        proto_update_thr=0.95,
+        ema_alpha_proto=0.95,
+        short_mem_frames=6,
+        memory_stride=1,
+        training_config_file="",
+        debug_long_mem=False,
         # checkpoint_file=None,
         **kwargs,
     ):
+        if short_mem_frames < 1:
+            raise ValueError("short_mem_frames must be >= 1")
+        if num_long_mem_candidate < 1:
+            raise ValueError("num_long_mem_candidate must be >= 1")
+        if num_long_mem_frame < 0:
+            raise ValueError("num_long_mem_frame must be >= 0")
+
+        # kwargs.setdefault("num_maskmem", short_mem_frames + 1)
+        # kwargs.setdefault("max_obj_ptrs_in_encoder", num_long_mem_candidate)
+        # kwargs.setdefault("memory_temporal_stride_for_eval", memory_stride)
+        # kwargs.setdefault("use_memory_selection", apply_long_mem)
+        # kwargs.setdefault("mf_threshold", long_mem_iou_thr)
+        kwargs.setdefault("use_cls_tokens", use_cls_inference or apply_long_mem)
+
         super().__init__(**kwargs)
         self.clear_non_cond_mem_around_input = clear_non_cond_mem_around_input
         self.clear_non_cond_mem_for_multi_obj = clear_non_cond_mem_for_multi_obj
-        self.fill_hole_area = fill_hole_area
+        self.fill_hole_area = fill_hole_area if apply_postprocessing else 0
         self.always_start_from_first_ann_frame = always_start_from_first_ann_frame
         self.max_point_num_in_prompt_enc = max_point_num_in_prompt_enc
         self.non_overlap_masks_for_output = non_overlap_masks_for_output
+        self.apply_postprocessing = apply_postprocessing
+        self.use_long_term_memory = apply_long_mem
+        self.use_iou_to_find_long_mem = apply_long_mem
+        self.use_short_memory_selection = False
+        self.num_long_mem_frame = num_long_mem_frame
+        self.num_long_mem_candidate = num_long_mem_candidate
+        self.long_mem_iou_thr = long_mem_iou_thr
+        self.use_cls_inference = use_cls_inference
+        self.use_continuous_divemem = use_continuous_divemem
+        self.proto_update_thr = proto_update_thr
+        self.ema_alpha_proto = ema_alpha_proto
+        self.short_mem_frames = short_mem_frames
+        self.memory_stride = memory_stride
+        self.training_config_file = training_config_file
+        self.debug_long_mem = debug_long_mem
 
         self.bf16_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         self.bf16_context.__enter__()  # keep using for the entire model process
@@ -115,6 +161,9 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         inference_state["output_dict"] = {
             "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
             "non_cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
+            "long_mem": deque(maxlen=self.num_long_mem_frame),
+            "long_mem_candidate": deque(maxlen=self.num_long_mem_candidate),
+            "prototype": None,
         }
         # The index of the frame that received the first annotation
         inference_state["first_ann_frame_idx"] = None
@@ -156,6 +205,9 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
             inference_state["output_dict_per_obj"][obj_idx] = {
                 "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
                 "non_cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
+                "long_mem": deque(maxlen=self.num_long_mem_frame),
+                "long_mem_candidate": deque(maxlen=self.num_long_mem_candidate),
+                "prototype": None,
             }
             inference_state["temp_output_dict_per_obj"][obj_idx] = {
                 "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
@@ -547,13 +599,13 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                 device=inference_state["device"],
             ),
         }
-        if self.use_memory_selection:
-            consolidated_out["iou_score"] = torch.full(
-                size=(batch_size, 1),
-                fill_value=0.0,
-                dtype=torch.float32,
-                device=inference_state["device"],
-            )
+        # if self.use_memory_selection:
+        consolidated_out["iou_score"] = torch.full(
+            size=(batch_size, 1),
+            fill_value=0.0,
+            dtype=torch.float32,
+            device=inference_state["device"],
+        )
         empty_mask_ptr = None
         for obj_idx in range(batch_size):
             obj_temp_output_dict = inference_state["temp_output_dict_per_obj"][obj_idx]
@@ -603,8 +655,8 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
             consolidated_out["object_score_logits"][obj_idx : obj_idx + 1] = out[
                 "object_score_logits"
             ]
-            if self.use_memory_selection:
-                consolidated_out["iou_score"][obj_idx : obj_idx + 1] = out["iou_score"]
+            # if self.use_memory_selection:
+            consolidated_out["iou_score"][obj_idx : obj_idx + 1] = out["iou_score"]
         # Optionally, apply non-overlapping constraints on the consolidated scores
         # and rerun the memory encoder
         if run_mem_encoder:
@@ -895,8 +947,16 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                 "obj_ptr": current_out["obj_ptr"][obj_slice],
                 "object_score_logits": current_out["object_score_logits"][obj_slice],
             }
+            if "out_cls_tokens" in current_out and current_out["out_cls_tokens"] is not None:
+                out_cls_tokens = current_out["out_cls_tokens"]
+                if out_cls_tokens.dim() >= 3 and out_cls_tokens.size(1) > obj_idx:
+                    obj_out["out_cls_tokens"] = out_cls_tokens[:, obj_slice]
+                else:
+                    obj_out["out_cls_tokens"] = out_cls_tokens[obj_slice]
+            obj_out["iou_score"] = current_out["iou_score"][obj_slice]
             if self.use_memory_selection:
-                obj_out["iou_score"] = current_out["iou_score"][obj_slice]
+                if "eff_iou_score" in current_out:
+                    obj_out["eff_iou_score"] = current_out["eff_iou_score"]
             if maskmem_features is not None:
                 obj_out["maskmem_features"] = maskmem_features[obj_slice]
             if maskmem_pos_enc is not None:
@@ -997,11 +1057,17 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         for v in inference_state["output_dict_per_obj"].values():
             v["cond_frame_outputs"].clear()
             v["non_cond_frame_outputs"].clear()
+            v["long_mem"].clear()
+            v["long_mem_candidate"].clear()
+            v["prototype"] = None
         for v in inference_state["temp_output_dict_per_obj"].values():
             v["cond_frame_outputs"].clear()
             v["non_cond_frame_outputs"].clear()
         inference_state["output_dict"]["cond_frame_outputs"].clear()
         inference_state["output_dict"]["non_cond_frame_outputs"].clear()
+        inference_state["output_dict"]["long_mem"].clear()
+        inference_state["output_dict"]["long_mem_candidate"].clear()
+        inference_state["output_dict"]["prototype"] = None
         inference_state["consolidated_frame_inds"]["cond_frame_outputs"].clear()
         inference_state["consolidated_frame_inds"]["non_cond_frame_outputs"].clear()
         inference_state["tracking_has_started"] = False
@@ -1047,6 +1113,389 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         features = (expanded_image,) + features
         return features
 
+    def _ensure_long_mem_state(self, output_dict):
+        output_dict.setdefault("long_mem", deque(maxlen=self.num_long_mem_frame))
+        output_dict.setdefault(
+            "long_mem_candidate", deque(maxlen=self.num_long_mem_candidate)
+        )
+        output_dict.setdefault("prototype", None)
+
+    def _cls_tokens_to_proto_vec(self, cls_tokens):
+        if cls_tokens is None:
+            return None
+        cls_tokens = cls_tokens.float()
+        if cls_tokens.dim() >= 3:
+            cls_tokens = cls_tokens.permute(
+                1, 0, *range(2, cls_tokens.dim())
+            ).reshape(cls_tokens.shape[1], -1)
+        elif cls_tokens.dim() == 2:
+            cls_tokens = cls_tokens.reshape(cls_tokens.shape[0], -1)
+        else:
+            cls_tokens = cls_tokens.reshape(1, -1)
+        return F.normalize(cls_tokens, dim=-1)
+
+    def _output_confidence(self, output):
+        iou_score = output.get("iou_score", output.get("ious", None))
+        if iou_score is None:
+            return None
+        iou_score = torch.as_tensor(iou_score).float().max()
+        obj_score_logits = output.get("object_score_logits", None)
+        if obj_score_logits is not None:
+            return obj_score_logits.sigmoid().float().mean() * iou_score
+        return iou_score
+
+    def _update_long_mem_prototype(self, output_dict, current_out):
+        self._ensure_long_mem_state(output_dict)
+        cur_vec = self._cls_tokens_to_proto_vec(current_out.get("out_cls_tokens", None))
+        cur_confidence = self._output_confidence(current_out)
+        if cur_vec is None or cur_confidence is None:
+            return
+
+        prototype = output_dict.get("prototype")
+        if prototype is None:
+            if cur_confidence > self.proto_update_thr:
+                output_dict["prototype"] = cur_vec.detach().clone()
+            return
+
+        if prototype.shape != cur_vec.shape:
+            output_dict["prototype"] = cur_vec.detach().clone()
+            return
+
+        if cur_confidence > self.proto_update_thr:
+            updated = self.ema_alpha_proto * prototype + (
+                1 - self.ema_alpha_proto
+            ) * cur_vec.detach()
+            output_dict["prototype"] = F.normalize(updated, dim=-1)
+
+    def _update_long_mem_candidates(self, output_dict, frame_idx):
+        self._ensure_long_mem_state(output_dict)
+        if not self.use_long_term_memory:
+            return
+
+        prev_frame_idx = frame_idx - 1
+        if prev_frame_idx < 0:
+            return
+        if prev_frame_idx % self.memory_temporal_stride_for_eval != 0:
+            return
+
+        prev_output = output_dict["non_cond_frame_outputs"].get(prev_frame_idx, None)
+        if prev_output is None:
+            return
+
+        if self.use_iou_to_find_long_mem:
+            prev_confidence = self._output_confidence(prev_output)
+            if prev_confidence is None:
+                return
+            if prev_confidence > self.long_mem_iou_thr:
+                output_dict["long_mem_candidate"].append(
+                    (prev_frame_idx, prev_confidence.detach())
+                )
+            elif self.use_continuous_divemem:
+                output_dict["long_mem_candidate"].clear()
+        else:
+            output_dict["long_mem_candidate"].append((prev_frame_idx, torch.tensor(1.0)))
+
+        if len(output_dict["long_mem_candidate"]) != self.num_long_mem_candidate:
+            return
+
+        prototype = output_dict.get("prototype")
+        best_frame_idx, best_sim = None, -float("inf")
+        if prototype is not None:
+            for cand_frame_idx, _ in output_dict["long_mem_candidate"]:
+                cand_out = output_dict["non_cond_frame_outputs"].get(cand_frame_idx)
+                cand_vec = self._cls_tokens_to_proto_vec(
+                    cand_out.get("out_cls_tokens", None) if cand_out else None
+                )
+                if cand_vec is None or cand_vec.shape != prototype.shape:
+                    continue
+                sim = float((cand_vec * prototype).sum(dim=-1).mean().item())
+                if sim > best_sim:
+                    best_sim, best_frame_idx = sim, cand_frame_idx
+
+        if best_frame_idx is None:
+            best_frame_idx, best_confidence = max(
+                output_dict["long_mem_candidate"],
+                key=lambda x: float(torch.as_tensor(x[1]).item()),
+            )
+            best_sim = float(torch.as_tensor(best_confidence).item())
+
+        selected_frame_idx = best_frame_idx
+        if prototype is None or len(output_dict["long_mem"]) < self.num_long_mem_frame:
+            output_dict["long_mem"].append(selected_frame_idx)
+            output_dict["long_mem_candidate"].clear()
+            if self.debug_long_mem:
+                print(f"long-term memory frame {selected_frame_idx} is selected")
+            return
+
+        worst_sim, worst_pos = float("inf"), 0
+        for i, lm_fidx in enumerate(output_dict["long_mem"]):
+            lm_out = output_dict["non_cond_frame_outputs"].get(lm_fidx, None)
+            lm_vec = self._cls_tokens_to_proto_vec(
+                lm_out.get("out_cls_tokens", None) if lm_out else None
+            )
+            if lm_vec is None or lm_vec.shape != prototype.shape:
+                continue
+            sim = float((lm_vec * prototype).sum(dim=-1).mean().item())
+            if sim < worst_sim:
+                worst_sim, worst_pos = sim, i
+
+        if best_sim > worst_sim:
+            evicted_fidx = output_dict["long_mem"][worst_pos]
+            output_dict["long_mem"].remove(evicted_fidx)
+            output_dict["long_mem"].append(selected_frame_idx)
+            if self.debug_long_mem:
+                print(
+                    f"long_mem evicted frame {evicted_fidx} "
+                    f"(proto-sim={worst_sim:.4f}), added frame "
+                    f"{selected_frame_idx} (proto-sim={best_sim:.4f})"
+                )
+        else:
+            if self.debug_long_mem:
+                print(
+                    f"long_mem candidate frame {selected_frame_idx} discarded "
+                    f"(proto-sim={best_sim:.4f} <= worst existing={worst_sim:.4f})"
+                )
+        output_dict["long_mem_candidate"].clear()
+
+    def _prepare_memory_conditioned_features(
+        self,
+        frame_idx,
+        is_init_cond_frame,
+        current_vision_feats,
+        current_vision_pos_embeds,
+        feat_sizes,
+        output_dict,
+        num_frames,
+        track_in_reverse=False,
+        use_prev_mem_frame=True,
+    ):
+        """Fuse current visual features with short-term and SurgSLOT-style long memory."""
+        B = current_vision_feats[-1].size(1)
+        C = self.hidden_dim
+        H, W = feat_sizes[-1]
+        device = current_vision_feats[-1].device
+        if self.num_maskmem == 0:
+            pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
+            return pix_feat
+
+        num_obj_ptr_tokens = 0
+        tpos_sign_mul = -1 if track_in_reverse else 1
+
+        if not is_init_cond_frame and use_prev_mem_frame:
+            self._ensure_long_mem_state(output_dict)
+            self._update_long_mem_candidates(output_dict, frame_idx)
+
+            to_cat_prompt, to_cat_prompt_mask, to_cat_prompt_pos_embed = [], [], []
+            assert len(output_dict["cond_frame_outputs"]) > 0
+            cond_outputs = output_dict["cond_frame_outputs"]
+            selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames(
+                frame_idx,
+                cond_outputs,
+                self.max_cond_frames_in_attn,
+                keep_first_cond_frame=self.keep_first_cond_frame,
+            )
+            if self.use_long_mem_tpos_enc:
+                t_pos_and_prevs = []
+                cond_t_pos = 0
+                for out in selected_cond_outputs.values():
+                    t_pos_and_prevs.append((cond_t_pos, out, True))
+                    cond_t_pos -= 1
+            else:
+                t_pos_and_prevs = [
+                    (0, out, True) for out in selected_cond_outputs.values()
+                ]
+
+            protected_spatial_mem_indices = []
+            first_cond_output = cond_outputs[min(cond_outputs)]
+            stride = 1 if self.training else self.memory_temporal_stride_for_eval
+            short_mem = []
+            if self.use_short_memory_selection:
+                valid_indices = self.frame_filter(
+                    output_dict, track_in_reverse, frame_idx, num_frames, stride
+                )
+
+            start_t_pos = max(1, self.num_maskmem - self.short_mem_frames)
+            for t_pos in range(start_t_pos, self.num_maskmem):
+                t_rel = self.num_maskmem - t_pos
+                if self.use_short_memory_selection:
+                    if t_rel > len(valid_indices):
+                        continue
+                    prev_frame_idx = valid_indices[-t_rel]
+                elif t_rel == 1:
+                    prev_frame_idx = (
+                        frame_idx + t_rel if track_in_reverse else frame_idx - t_rel
+                    )
+                elif not track_in_reverse:
+                    prev_frame_idx = ((frame_idx - 2) // stride) * stride
+                    prev_frame_idx = prev_frame_idx - (t_rel - 2) * stride
+                else:
+                    prev_frame_idx = -(-(frame_idx + 2) // stride) * stride
+                    prev_frame_idx = prev_frame_idx + (t_rel - 2) * stride
+
+                out = output_dict["non_cond_frame_outputs"].get(prev_frame_idx, None)
+                if out is None:
+                    out = unselected_cond_outputs.get(prev_frame_idx, None)
+                t_pos_and_prevs.append((t_pos, out, False))
+                short_mem.append(prev_frame_idx)
+
+            for t_pos, prev, is_selected_cond_frame in t_pos_and_prevs:
+                if prev is None:
+                    continue
+                if prev is first_cond_output:
+                    protected_spatial_mem_indices.append(len(to_cat_prompt))
+                feats = prev["maskmem_features"].to(device, non_blocking=True)
+                seq_len = feats.shape[-2] * feats.shape[-1]
+                to_cat_prompt.append(feats.flatten(2).permute(2, 0, 1))
+                to_cat_prompt_mask.append(
+                    torch.zeros(B, seq_len, device=device, dtype=bool)
+                )
+                maskmem_enc = prev["maskmem_pos_enc"][-1].to(device)
+                maskmem_enc = maskmem_enc.flatten(2).permute(2, 0, 1)
+                if (
+                    is_selected_cond_frame
+                    and getattr(self, "cond_frame_spatial_embedding", None) is not None
+                ):
+                    maskmem_enc = maskmem_enc + self.cond_frame_spatial_embedding
+                if is_selected_cond_frame and t_pos < 0:
+                    maskmem_enc = maskmem_enc + self.long_mem_tpos_enc[0]
+                else:
+                    t = t_pos if not is_selected_cond_frame else 0
+                    maskmem_enc = (
+                        maskmem_enc + self.maskmem_tpos_enc[self.num_maskmem - t - 1]
+                    )
+                to_cat_prompt_pos_embed.append(maskmem_enc)
+
+            if self.use_long_term_memory:
+                for long_mem_frame_idx in output_dict["long_mem"]:
+                    if long_mem_frame_idx in short_mem:
+                        continue
+                    long_mem_output = output_dict["non_cond_frame_outputs"].get(
+                        long_mem_frame_idx, None
+                    )
+                    if long_mem_output is None:
+                        continue
+                    long_mem_feats = long_mem_output["maskmem_features"].to(
+                        device, non_blocking=True
+                    )
+                    seq_len = long_mem_feats.shape[-2] * long_mem_feats.shape[-1]
+                    to_cat_prompt.append(long_mem_feats.flatten(2).permute(2, 0, 1))
+                    to_cat_prompt_mask.append(
+                        torch.zeros(B, seq_len, device=device, dtype=bool)
+                    )
+                    long_mem_pos_enc = long_mem_output["maskmem_pos_enc"][-1].to(device)
+                    long_mem_pos_enc = long_mem_pos_enc.flatten(2).permute(2, 0, 1)
+                    if self.use_long_mem_tpos_enc:
+                        long_mem_pos_enc = long_mem_pos_enc + self.long_mem_tpos_enc[0]
+                    else:
+                        long_mem_pos_enc = long_mem_pos_enc + self.maskmem_tpos_enc[0]
+                    to_cat_prompt_pos_embed.append(long_mem_pos_enc)
+
+            if (
+                self.training
+                and self.prob_to_dropout_spatial_mem > 0
+                and self.rng.random() < self.prob_to_dropout_spatial_mem
+            ):
+                num_spatial_mem_keep = self.rng.integers(len(to_cat_prompt) + 1)
+                keep = self.rng.choice(
+                    range(len(to_cat_prompt)), num_spatial_mem_keep, replace=False
+                ).tolist()
+                keep = sorted(set(keep).union(protected_spatial_mem_indices))
+                to_cat_prompt = [to_cat_prompt[i] for i in keep]
+                to_cat_prompt_mask = [to_cat_prompt_mask[i] for i in keep]
+                to_cat_prompt_pos_embed = [to_cat_prompt_pos_embed[i] for i in keep]
+
+            max_obj_ptrs_in_encoder = min(num_frames, self.max_obj_ptrs_in_encoder)
+            if not self.training:
+                ptr_cond_outputs = {
+                    t: out
+                    for t, out in selected_cond_outputs.items()
+                    if (t >= frame_idx if track_in_reverse else t <= frame_idx)
+                }
+            else:
+                ptr_cond_outputs = dict(selected_cond_outputs)
+            pos_and_ptrs = [
+                ((frame_idx - t) * tpos_sign_mul, out["obj_ptr"], True)
+                for t, out in ptr_cond_outputs.items()
+            ]
+
+            if self.use_long_term_memory:
+                for long_mem_frame_idx in output_dict["long_mem"]:
+                    long_mem_output = output_dict["non_cond_frame_outputs"].get(
+                        long_mem_frame_idx, None
+                    )
+                    if long_mem_output is not None:
+                        t_diff = (frame_idx - long_mem_frame_idx) * tpos_sign_mul
+                        pos_and_ptrs.append((t_diff, long_mem_output["obj_ptr"], False))
+
+            for t_diff in range(1, max_obj_ptrs_in_encoder):
+                t = frame_idx + t_diff if track_in_reverse else frame_idx - t_diff
+                if t < 0 or (num_frames is not None and t >= num_frames):
+                    break
+                out = output_dict["non_cond_frame_outputs"].get(
+                    t, unselected_cond_outputs.get(t, None)
+                )
+                if out is not None:
+                    pos_and_ptrs.append((t_diff, out["obj_ptr"], False))
+
+            if len(pos_and_ptrs) > 0:
+                pos_list, ptrs_list, is_selected_cond_frame_list = zip(*pos_and_ptrs)
+                obj_ptrs = torch.stack(ptrs_list, dim=0)
+                if getattr(self, "cond_frame_obj_ptr_embedding", None) is not None:
+                    obj_ptrs = (
+                        obj_ptrs
+                        + self.cond_frame_obj_ptr_embedding
+                        * torch.tensor(is_selected_cond_frame_list, device=device)[
+                            ..., None, None
+                        ].float()
+                    )
+                obj_pos = self._get_tpos_enc(
+                    pos_list,
+                    max_abs_pos=max_obj_ptrs_in_encoder,
+                    device=device,
+                )
+                obj_pos = obj_pos.unsqueeze(1).expand(-1, B, -1)
+                if self.mem_dim < C:
+                    obj_ptrs = obj_ptrs.reshape(-1, B, C // self.mem_dim, self.mem_dim)
+                    obj_ptrs = obj_ptrs.permute(0, 2, 1, 3).flatten(0, 1)
+                    obj_pos = obj_pos.repeat_interleave(C // self.mem_dim, dim=0)
+                to_cat_prompt.append(obj_ptrs)
+                to_cat_prompt_mask.append(None)
+                to_cat_prompt_pos_embed.append(obj_pos)
+                num_obj_ptr_tokens = obj_ptrs.shape[0]
+            else:
+                num_obj_ptr_tokens = 0
+        else:
+            pix_feat_with_mem = current_vision_feats[-1] + self.no_mem_embed
+            pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
+            memory_cls_tokens = (
+                self.cls_tokens.expand(-1, B, -1)
+                if self.use_cls_tokens and self.use_cls_inference
+                else None
+            )
+            return pix_feat_with_mem, memory_cls_tokens
+
+        cls_tokens_input = (
+            self.cls_tokens.expand(-1, B, -1)
+            if self.use_cls_tokens and self.use_cls_inference
+            else None
+        )
+        prompt = torch.cat(to_cat_prompt, dim=0)
+        prompt_pos_embed = torch.cat(to_cat_prompt_pos_embed, dim=0)
+        encoder_out = self.transformer.encoder(
+            src=current_vision_feats,
+            src_key_padding_mask=[None],
+            src_pos=current_vision_pos_embeds,
+            prompt=prompt,
+            prompt_pos=prompt_pos_embed,
+            prompt_key_padding_mask=None,
+            feat_sizes=feat_sizes,
+            num_obj_ptr_tokens=num_obj_ptr_tokens,
+            cls_tokens=cls_tokens_input,
+        )
+        memory_cls_tokens = encoder_out.get("memory_cls_tokens", None)
+        pix_feat_with_mem = encoder_out["memory"].permute(1, 2, 0).view(B, C, H, W)
+        return pix_feat_with_mem, memory_cls_tokens
+
     def _run_single_frame_inference(
         self,
         inference_state,
@@ -1089,6 +1538,8 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
             prev_sam_mask_logits=prev_sam_mask_logits,
             use_prev_mem_frame=use_prev_mem_frame,
         )
+        if self.use_long_term_memory and not is_init_cond_frame:
+            self._update_long_mem_prototype(output_dict, current_out)
 
         # optionally offload the output to CPU memory to save GPU space
         storage_device = inference_state["storage_device"]
@@ -1111,8 +1562,11 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
             "obj_ptr": obj_ptr,
             "object_score_logits": object_score_logits,
         }
+        out_cls_tokens = current_out.get("out_cls_tokens", None)
+        if out_cls_tokens is not None:
+            compact_current_out["out_cls_tokens"] = out_cls_tokens
+        compact_current_out["iou_score"] = current_out["iou_score"]
         if self.use_memory_selection:
-            compact_current_out["iou_score"] = current_out["iou_score"]
             compact_current_out["eff_iou_score"] = current_out["eff_iou_score"]
         return compact_current_out, pred_masks_gpu
 
@@ -1261,8 +1715,8 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                 out["object_score_logits"] = out["object_score_logits"][
                     remain_old_obj_inds
                 ]
+                out["iou_score"] = out["iou_score"][remain_old_obj_inds]
                 if self.use_memory_selection:
-                    out["iou_score"] = out["iou_score"][remain_old_obj_inds]
                     out["eff_iou_score"] = self.cal_mem_score(
                         out["object_score_logits"], out["iou_score"]
                     )  # recalculate the memory frame score

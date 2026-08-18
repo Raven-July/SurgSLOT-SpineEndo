@@ -19,6 +19,10 @@ from sam3.model.decoder import (
     TransformerEncoderCrossAttention,
     TransformerEncoderDecoupledCrossAttention,
 )
+from sam3.model.cls_memory_attention import (
+    ClsMemoryAttention,
+    ClsMemoryAttentionLayer,
+)
 from sam3.model.encoder import TransformerEncoderFusion, TransformerEncoderLayer
 from sam3.model.geometry_encoders import SequenceGeometryEncoder
 from sam3.model.maskformer_segmentation import PixelDecoder, UniversalSegmentationHead
@@ -74,10 +78,12 @@ def _create_position_encoding(precompute_resolution=None):
     )
 
 
-def _create_vit_backbone(compile_mode=None, use_fa3=False, use_rope_real=False):
+def _create_vit_backbone(
+    compile_mode=None, use_fa3=False, use_rope_real=False, img_size=1008
+):
     """Create ViT backbone for visual feature extraction."""
     return ViT(
-        img_size=1008,
+        img_size=img_size,
         pretrain_img_size=336,
         patch_size=14,
         embed_dim=1024,
@@ -341,20 +347,24 @@ def _create_sam3_model(
     return model
 
 
-def _create_tracker_maskmem_backbone():
+def _create_tracker_maskmem_backbone(
+    precompute_resolution=1008, interpol_size=None
+):
     """Create the SAM3 Tracker memory encoder."""
+    if interpol_size is None:
+        interpol_size = [1152, 1152]
     # Position encoding for mask memory backbone
     position_encoding = PositionEmbeddingSine(
         num_pos_feats=64,
         normalize=True,
         scale=None,
         temperature=10000,
-        precompute_resolution=1008,
+        precompute_resolution=precompute_resolution,
     )
 
     # Mask processing components
     mask_downsampler = SimpleMaskDownSampler(
-        kernel_size=3, stride=2, padding=1, interpol_size=[1152, 1152]
+        kernel_size=3, stride=2, padding=1, interpol_size=interpol_size
     )
 
     cx_block_layer = CXBlock(
@@ -377,7 +387,12 @@ def _create_tracker_maskmem_backbone():
     return maskmem_backbone
 
 
-def _create_tracker_transformer():
+def _create_tracker_transformer(
+    feat_size=72,
+    use_fa3=False,
+    use_rope_real=False,
+    use_cls_mem_attn=False,
+):
     """Create the SAM3 Tracker transformer components."""
     # Self attention
     self_attention = RoPEAttention(
@@ -386,9 +401,9 @@ def _create_tracker_transformer():
         downsample_rate=1,
         dropout=0.1,
         rope_theta=10000.0,
-        feat_sizes=[72, 72],
-        use_fa3=False,
-        use_rope_real=False,
+        feat_sizes=[feat_size, feat_size],
+        use_fa3=use_fa3,
+        use_rope_real=use_rope_real,
     )
 
     # Cross attention
@@ -399,14 +414,17 @@ def _create_tracker_transformer():
         dropout=0.1,
         kv_in_dim=64,
         rope_theta=10000.0,
-        feat_sizes=[72, 72],
+        feat_sizes=[feat_size, feat_size],
         rope_k_repeat=True,
-        use_fa3=False,
-        use_rope_real=False,
+        use_fa3=use_fa3,
+        use_rope_real=use_rope_real,
     )
 
     # Encoder layer
-    encoder_layer = TransformerDecoderLayerv2(
+    layer_cls = (
+        ClsMemoryAttentionLayer if use_cls_mem_attn else TransformerDecoderLayerv2
+    )
+    encoder_layer = layer_cls(
         cross_attention_first=False,
         activation="relu",
         dim_feedforward=2048,
@@ -421,7 +439,10 @@ def _create_tracker_transformer():
     )
 
     # Encoder
-    encoder = TransformerEncoderCrossAttention(
+    encoder_cls = (
+        ClsMemoryAttention if use_cls_mem_attn else TransformerEncoderCrossAttention
+    )
+    encoder = encoder_cls(
         remove_cross_attention_layers=[],
         batch_first=True,
         d_model=256,
@@ -510,13 +531,24 @@ def _create_text_encoder(bpe_path: str) -> VETextEncoder:
 
 
 def _create_vision_backbone(
-    compile_mode=None, enable_inst_interactivity=True
+    compile_mode=None,
+    enable_inst_interactivity=True,
+    image_size=1008,
+    use_fa3=False,
+    use_rope_real=False,
 ) -> Sam3DualViTDetNeck:
     """Create SAM3 visual backbone with ViT and neck."""
     # Position encoding
-    position_encoding = _create_position_encoding(precompute_resolution=1008)
+    position_encoding = _create_position_encoding(
+        precompute_resolution=image_size
+    )
     # ViT backbone
-    vit_backbone: ViT = _create_vit_backbone(compile_mode=compile_mode)
+    vit_backbone: ViT = _create_vit_backbone(
+        compile_mode=compile_mode,
+        use_fa3=use_fa3,
+        use_rope_real=use_rope_real,
+        img_size=image_size,
+    )
     vit_neck: Sam3DualViTDetNeck = _create_vit_neck(
         position_encoding,
         vit_backbone,
@@ -1238,6 +1270,147 @@ def build_sam3_multiplex_video_predictor(
         async_loading_frames=async_loading_frames,
         warm_up=warm_up,
     )
+    return predictor
+
+
+def _load_surgslot_sam3_checkpoint_into(model, checkpoint_path: str):
+    """Load a fine-tuned SurgSLOT tracker checkpoint using the original key mapping."""
+    with g_pathmgr.open(checkpoint_path, "rb") as f:
+        checkpoint = torch.load(f, map_location="cpu", weights_only=True)
+    if "model" in checkpoint and isinstance(checkpoint["model"], dict):
+        checkpoint = checkpoint["model"]
+
+    if any(key.startswith("tracker.") for key in checkpoint):
+        remapped = {}
+        for key, value in checkpoint.items():
+            if key.startswith("tracker."):
+                remapped[key[len("tracker.") :]] = value
+            elif key.startswith("detector.backbone."):
+                new_key = "backbone." + key[len("detector.backbone.") :]
+                if new_key not in remapped:
+                    remapped[new_key] = value
+        checkpoint = remapped
+        print(f"[SAM3] Remapped checkpoint: {len(checkpoint)} keys")
+
+    model_state = model.state_dict()
+    filtered_checkpoint = {}
+    skipped = []
+    for key, value in checkpoint.items():
+        if key in model_state and value.shape != model_state[key].shape:
+            skipped.append(
+                f"{key}: ckpt {value.shape} vs model {model_state[key].shape}"
+            )
+        else:
+            filtered_checkpoint[key] = value
+    if skipped:
+        print(f"[SAM3] Skipped {len(skipped)} shape-mismatched keys:")
+        for item in skipped:
+            print(f"  {item}")
+
+    missing, unexpected = model.load_state_dict(filtered_checkpoint, strict=False)
+    print(f"[SAM3] missing={len(missing)}, unexpected={len(unexpected)}")
+    if missing:
+        print(f"[SAM3] first 10 missing: {missing[:10]}")
+    if unexpected:
+        print(f"[SAM3] first 10 unexpected: {unexpected[:10]}")
+
+
+def build_surgslot_sam3_predictor(
+    checkpoint_path: str,
+    image_size: int = 672,
+    use_fa3: bool = False,
+    use_rope_real: bool = False,
+    apply_postprocessing: bool = False,
+    apply_long_mem: bool = True,
+    num_long_mem_frame: int = 3,
+    num_long_mem_candidate: int = 5,
+    long_mem_iou_thr: float = 0.9,
+    use_cls_inference: bool = True,
+    use_cls_mem_attn: bool = False,
+    use_long_mem_tpos_enc: bool = True,
+    use_continuous_divemem: bool = True,
+    proto_update_thr: float = 0.9,
+    ema_alpha_proto: float = 0.95,
+    short_mem_frames: int = 6,
+    memory_stride: int = 1,
+    training_config_file: str = "configs/sam3_surgslot/surgslot_sam3_sasv",
+    debug_long_mem: bool = False,
+):
+    """Build the SurgSLOT VOS predictor with the paper's evaluation defaults."""
+    backbone_stride = 14
+    feat_size = image_size // backbone_stride
+    interpol_size = [int(image_size * 8 / 7)] * 2
+
+    maskmem_backbone = _create_tracker_maskmem_backbone(
+        precompute_resolution=image_size,
+        interpol_size=interpol_size,
+    )
+    transformer = _create_tracker_transformer(
+        feat_size=feat_size,
+        use_fa3=use_fa3,
+        use_rope_real=use_rope_real,
+        use_cls_mem_attn=use_cls_mem_attn,
+    )
+    vision_backbone = _create_vision_backbone(
+        image_size=image_size,
+        enable_inst_interactivity=True,
+        use_fa3=use_fa3,
+        use_rope_real=use_rope_real,
+    )
+    backbone = SAM3VLBackbone(scalp=1, visual=vision_backbone, text=None)
+
+    predictor = Sam3TrackerPredictor(
+        backbone=backbone,
+        transformer=transformer,
+        maskmem_backbone=maskmem_backbone,
+        apply_postprocessing=apply_postprocessing,
+        apply_long_mem=apply_long_mem,
+        num_long_mem_frame=num_long_mem_frame,
+        num_long_mem_candidate=num_long_mem_candidate,
+        long_mem_iou_thr=long_mem_iou_thr,
+        use_cls_inference=use_cls_inference,
+        use_long_mem_tpos_enc=use_long_mem_tpos_enc,
+        use_continuous_divemem=use_continuous_divemem,
+        proto_update_thr=proto_update_thr,
+        ema_alpha_proto=ema_alpha_proto,
+        short_mem_frames=short_mem_frames,
+        memory_stride=memory_stride,
+        training_config_file=training_config_file,
+        debug_long_mem=debug_long_mem,
+        image_size=image_size,
+        backbone_stride=backbone_stride,
+        multimask_output_in_sam=True,
+        multimask_output_for_tracking=True,
+        multimask_min_pt_num=0,
+        multimask_max_pt_num=1,
+        max_cond_frames_in_attn=4,
+        non_overlap_masks_for_mem_enc=False,
+        offload_output_to_cpu_for_eval=False,
+        trim_past_non_cond_mem_for_eval=False,
+        sam_mask_decoder_extra_args={
+            "dynamic_multimask_via_stability": True,
+            "dynamic_multimask_stability_delta": 0.05,
+            "dynamic_multimask_stability_thresh": 0.98,
+        },
+        compile_all_components=False,
+    )
+
+    print(
+        "[SAM3 VOS] "
+        f"apply_long_mem={apply_long_mem}, "
+        f"num_long_mem_frame={num_long_mem_frame}, "
+        f"num_long_mem_candidate={num_long_mem_candidate}, "
+        f"long_mem_iou_thr={long_mem_iou_thr}, "
+        f"use_cls_inference={use_cls_inference}, "
+        f"use_continuous_divemem={use_continuous_divemem}, "
+        f"proto_update_thr={proto_update_thr}, "
+        f"ema_alpha_proto={ema_alpha_proto}, "
+        f"short_mem_frames={short_mem_frames}, "
+        f"memory_stride={memory_stride}, "
+        f"debug_long_mem={debug_long_mem}"
+    )
+
+    _load_surgslot_sam3_checkpoint_into(predictor, checkpoint_path)
     return predictor
 
 
