@@ -11,7 +11,6 @@ import torch
 import torch.distributed
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 import logging
 from training.trainer import CORE_LOSS_KEY
 
@@ -57,7 +56,6 @@ def sigmoid_focal_loss(
     alpha: float = 0.25,
     gamma: float = 2,
     loss_on_multimask=False,
-    pixel_weights=None,
 ):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
@@ -84,9 +82,6 @@ def sigmoid_focal_loss(
     if alpha >= 0:
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
-
-    if pixel_weights is not None:
-        loss = pixel_weights * loss
 
     if loss_on_multimask:
         # loss is [N, M, H, W] where M corresponds to multiple predicted masks
@@ -127,24 +122,6 @@ def iou_loss(
         return loss / num_objects
     return loss.sum() / num_objects
 
-def compute_boundary_entropy_weights(pred_masks, gt_masks, kernel_size=9, alpha=0.5):
-    # edge = compute_edge(y_hard)  # sobel or laplacian
-    dilated = F.max_pool2d(gt_masks, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
-    eroded = -F.max_pool2d(-gt_masks, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
-    border_mask = (dilated - eroded).detach()
-
-    prob_pred_masks = torch.sigmoid(pred_masks)
-    prob_pred_masks = prob_pred_masks.clamp(min=1e-7, max=1 - 1e-7)
-    entropy = -(prob_pred_masks * prob_pred_masks.log() + (1 - prob_pred_masks) * (1 - prob_pred_masks).log())
-    entropy_norm = (entropy / math.log(2)).detach()  # Normalize to [0, 1].
-
-    # print("entropy_norm max value {}, min value {}".format(entropy_norm.max(), entropy_norm.min()))
-    # Downweight high-entropy pixels inside the boundary band; learn normally outside it.
-    noise_score = entropy_norm * border_mask
-    pixel_weight = 1.0 - alpha * noise_score
-    pixel_weight = pixel_weight.clamp(min=0.1)
-    return pixel_weight
-
 class MultiStepMultiMasksAndIous(nn.Module):
     def __init__(
         self,
@@ -157,9 +134,6 @@ class MultiStepMultiMasksAndIous(nn.Module):
         focal_gamma_obj_score=0.0,
         focal_alpha_obj_score=-1,
         use_cls_tokens=False,
-        use_entropy_weighted_loss=False,
-        entropy_boundary_kernel_size=9,  # Odd dilation/erosion kernel size; defaults to 9.
-        entropy_weighted_alpha=0.5,
         cls_pretrained_epoch=0,
         confidence_cls=0.7,
         ema_alpha_proto=0.95,
@@ -198,9 +172,6 @@ class MultiStepMultiMasksAndIous(nn.Module):
         self.iou_use_l1_loss = iou_use_l1_loss
         self.pred_obj_scores = pred_obj_scores
         self.use_cls_tokens = use_cls_tokens
-        self.use_entropy_weighted_loss = use_entropy_weighted_loss
-        self.entropy_boundary_kernel_size = entropy_boundary_kernel_size
-        self.entropy_weighted_alpha = entropy_weighted_alpha
         self.cls_pretrained_epoch = cls_pretrained_epoch
         self.confidence_cls = confidence_cls
         self.ema_alpha_proto = ema_alpha_proto
@@ -382,28 +353,14 @@ class MultiStepMultiMasksAndIous(nn.Module):
     ):
         target_masks = target_masks.expand_as(src_masks)
         # get focal, dice and iou loss on all output masks in a prediction step
-        if self.use_entropy_weighted_loss:
-            boundary_entropy_weights = compute_boundary_entropy_weights(src_masks, target_masks,
-                                                                        kernel_size=self.entropy_boundary_kernel_size,
-                                                                        alpha=self.entropy_weighted_alpha)
-            loss_multimask = sigmoid_focal_loss(
-                src_masks,
-                target_masks,
-                num_objects,
-                alpha=self.focal_alpha,
-                gamma=self.focal_gamma,
-                loss_on_multimask=True,
-                pixel_weights=boundary_entropy_weights,
-            )
-        else:
-            loss_multimask = sigmoid_focal_loss(
-                src_masks,
-                target_masks,
-                num_objects,
-                alpha=self.focal_alpha,
-                gamma=self.focal_gamma,
-                loss_on_multimask=True,
-            )
+        loss_multimask = sigmoid_focal_loss(
+            src_masks,
+            target_masks,
+            num_objects,
+            alpha=self.focal_alpha,
+            gamma=self.focal_gamma,
+            loss_on_multimask=True,
+        )
         loss_multidice = dice_loss(
             src_masks, target_masks, num_objects, loss_on_multimask=True
         )

@@ -237,19 +237,6 @@ def vos_separate_inference_per_object(
                     labels=labels,
                     clear_old_points=True,
                 )
-                # # sample_box_points
-                # input_mask = inputs_per_object[object_id][input_frame_idx]
-                # y_indices, x_indices = np.where(input_mask > 0.5)
-                # bbox = [np.min(x_indices), np.min(y_indices), np.max(x_indices), np.max(y_indices)]
-                # pass
-                # # Expand by five pixels.
-                # bbox = [max(0, bbox[0] - 5), max(0, bbox[1] - 5), min(width - 1, bbox[2] + 5), min(height - 1, bbox[3] + 5)]
-                # _, _, this_high_res_masks = predictor.add_new_points_or_box(
-                #     inference_state=inference_state,
-                #     frame_idx=input_frame_idx,
-                #     obj_id=object_id,
-                #     box=bbox,
-                # )
             else:
                 raise ValueError(f"Unknown prompt type: {prompt_type}")
 
@@ -307,15 +294,6 @@ def vos_separate_inference_per_object(
                     labels=labels,
                     clear_old_points=True,
                 )
-                # input_mask = inputs_per_object[object_id][input_frame_idx]
-                # y_indices, x_indices = np.where(input_mask > 0)
-                # bbox = [np.min(x_indices), np.min(y_indices), np.max(x_indices), np.max(y_indices)]
-                # _, _, high_res_masks = predictor.add_new_points_or_box(
-                #     inference_state=inference_state,
-                #     frame_idx=input_frame_idx,
-                #     obj_id=object_id,
-                #     box=bbox,
-                # )
             else:
                 raise ValueError(f"Unknown prompt type: {prompt_type}")
 
@@ -328,15 +306,6 @@ def vos_separate_inference_per_object(
             obj_scores = out_mask_logits
             output_scores_per_object[object_id][out_frame_idx] = obj_scores.to('cpu', non_blocking=True)
 
-        # # TODO: Add reverse inference.
-        # # run propagation throughout the video and collect the results in a dict
-        # for out_frame_idx, _, out_mask_logits in predictor.propagate_in_video(
-        #         inference_state,
-        #         start_frame_idx=min(input_frame_inds),
-        #         reverse=True,
-        # ):
-        #     obj_scores = out_mask_logits
-        #     output_scores_per_object[object_id][out_frame_idx] = obj_scores.cpu().numpy()
 
     video_segments = {}
     # save_frame_interval controls the output frequency.
@@ -362,6 +331,45 @@ def vos_separate_inference_per_object(
             output_per_obj_png_file=True,
             height=height,
             width=width,
+            output_palette=input_palette,
+        )
+
+    # Also save all objects in one palette PNG per frame. Resolve overlaps from
+    # the logits before packing object ids so SAM2 and SAM3 share the same output
+    # structure and consolidation behavior.
+    video_segments = {}
+    for frame_idx in range(len(frame_names)):
+        frame_time = int(frame_names[frame_idx])
+        if frame_time % save_frame_interval != 0:
+            continue
+        scores = torch.full(
+            size=(len(object_ids), 1, height, width),
+            fill_value=-1024.0,
+            dtype=torch.float32,
+            device=inference_state["device"],
+        )
+        for i, object_id in enumerate(object_ids):
+            if frame_idx in output_scores_per_object[object_id]:
+                object_score = output_scores_per_object[object_id][frame_idx].to(
+                    inference_state["device"]
+                )
+                scores[i] = object_score.reshape(-1, height, width)[0:1]
+
+        scores = predictor._apply_non_overlapping_constraints(scores)
+        video_segments[frame_idx] = {
+            object_id: (scores[i] > score_thresh).cpu().numpy()
+            for i, object_id in enumerate(object_ids)
+        }
+
+    for frame_idx, per_obj_output_mask in video_segments.items():
+        save_masks_to_dir(
+            output_mask_dir=output_mask_dir,
+            video_name=video_name,
+            frame_name=frame_names[frame_idx],
+            per_obj_output_mask=per_obj_output_mask,
+            height=height,
+            width=width,
+            output_per_obj_png_file=False,
             output_palette=input_palette,
         )
 

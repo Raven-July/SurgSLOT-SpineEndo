@@ -16,7 +16,6 @@ scratch:
   num_epochs: 1
   freeze_image_encoder: false
   use_tissue_text: false
-  use_entropy_weighted_loss: false
   cls_pretrained_epoch: 0
   compute_consistency_loss: true   # more params specify in the loss config section
 
@@ -294,7 +293,6 @@ trainer:
       focal_gamma_obj_score: 0.0
       focal_alpha_obj_score: -1.0
       use_cls_tokens: true
-      use_entropy_weighted_loss: ${scratch.use_entropy_weighted_loss}
       cls_pretrained_epoch: ${scratch.cls_pretrained_epoch}
 
 
