@@ -45,6 +45,7 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
         proto_update_thr=0.9,
         ema_alpha_proto=0.95,
         short_mem_frames=6,
+        debug_long_mem=False,
         **kwargs,
     ):
         super().__init__(
@@ -66,6 +67,7 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
         self.proto_update_thr = proto_update_thr
         self.ema_alpha_proto = ema_alpha_proto
         self.short_mem_frames = short_mem_frames
+        self.debug_long_mem = debug_long_mem
         if use_long_term_memory and use_iou_to_find_long_mem and proto_update_thr > long_mem_iou_thr:
             warnings.warn(
                 f"proto_update_thr ({proto_update_thr}) > long_mem_iou_thr ({long_mem_iou_thr}): "
@@ -81,7 +83,6 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
         offload_video_to_cpu=False,
         offload_state_to_cpu=False,
         async_loading_frames=False,
-        frame_interval=1,
     ):
         """Initialize an inference state."""
         compute_device = self.device  # device of the model
@@ -91,7 +92,6 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
             offload_video_to_cpu=offload_video_to_cpu,
             async_loading_frames=async_loading_frames,
             compute_device=compute_device,
-            frame_interval=frame_interval
         )
         inference_state = {}
         inference_state["images"] = images
@@ -889,10 +889,11 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
                         best_frame_idx, _ = max(output_dict["long_mem_candidate"], key=lambda x: x[1])
                         best_sim = float("nan")
                     selected_frame_idx = best_frame_idx
-                    print(
-                        f"long-term memory frame {selected_frame_idx} is selected "
-                        f"(proto-sim={best_sim:.4f})"
-                    )
+                    if self.debug_long_mem:
+                        print(
+                            f"long-term memory frame {selected_frame_idx} is selected "
+                            f"(proto-sim={best_sim:.4f})"
+                        )
 
                     if prototype is not None:
                         # NOTE: Evict the frame least similar to the prototype, including
@@ -909,18 +910,20 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
                                     worst_sim, worst_pos = sim, i
                             if best_sim <= worst_sim:
                                 # candidate is worst — discard it, keep long_mem unchanged
-                                print(
-                                    f"long_mem candidate frame {selected_frame_idx} discarded "
-                                    f"(proto-sim={best_sim:.4f} <= worst existing={worst_sim:.4f})"
-                                )
+                                if self.debug_long_mem:
+                                    print(
+                                        f"long_mem candidate frame {selected_frame_idx} discarded "
+                                        f"(proto-sim={best_sim:.4f} <= worst existing={worst_sim:.4f})"
+                                    )
                             else:
                                 evicted_fidx = output_dict["long_mem"][worst_pos]
                                 output_dict["long_mem"].pop(worst_pos)
                                 output_dict["long_mem"].append(selected_frame_idx)
-                                print(
-                                    f"long_mem evicted frame {evicted_fidx} (proto-sim={worst_sim:.4f}), "
-                                    f"added frame {selected_frame_idx} (proto-sim={best_sim:.4f})"
-                                )
+                                if self.debug_long_mem:
+                                    print(
+                                        f"long_mem evicted frame {evicted_fidx} (proto-sim={worst_sim:.4f}), "
+                                        f"added frame {selected_frame_idx} (proto-sim={best_sim:.4f})"
+                                    )
                         else:
                             output_dict["long_mem"].append(selected_frame_idx)
                         output_dict["long_mem_candidate"].clear()

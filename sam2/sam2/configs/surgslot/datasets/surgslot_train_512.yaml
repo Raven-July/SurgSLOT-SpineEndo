@@ -1,0 +1,366 @@
+# @package _global_
+
+# SurgSLOT training datasets.
+# This block is copied verbatim from the original training config so the
+# compact config can be tested without changing dataset or sampling behavior.
+trainer:
+  data:
+    train:
+      _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
+      phases_per_epoch: ${scratch.phases_per_epoch}
+      batch_sizes:
+        - ${scratch.train_batch_size}
+        - ${scratch.train_batch_size}
+        - ${scratch.train_batch_size}
+      dataset_prob:
+        - 0.4
+        - 0.4
+        - 0.2
+      datasets:
+        - _target_: training.dataset.utils.RepeatFactorWrapper
+          dataset:
+            _target_: training.dataset.utils.ConcatDataset
+            datasets:
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/GraSP/train/images
+                  gt_folder: ./data/GraSP/train/masks
+                  meta_folder: ./data/GraSP/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.2
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: ${scratch.num_frames}
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/cholecinstanceseg/train/images
+                  gt_folder: ./data/cholecinstanceseg/train/masks
+                  meta_folder: ./data/cholecinstanceseg/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.02
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: ${scratch.num_frames}
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/AutoLaparo/train/images
+                  gt_folder: ./data/AutoLaparo/train/masks
+                  meta_folder: ./data/AutoLaparo/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.34
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: ${scratch.num_frames}
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/cholecseg8k_0508/train/images
+                  gt_folder: ./data/cholecseg8k_0508/train/masks
+                  meta_folder: ./data/cholecseg8k_0508/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.15
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: ${scratch.num_frames}
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/DSAD/train/images
+                  gt_folder: ./data/DSAD/train/masks
+                  meta_folder: ./data/DSAD/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.2
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: ${scratch.num_frames}
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/cvc-612/train/images
+                  gt_folder: ./data/cvc-612/train/masks
+                  meta_folder: ./data/cvc-612/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 2
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: ${scratch.num_frames}
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+        - _target_: training.dataset.utils.RepeatFactorWrapper
+          dataset:
+            _target_: training.dataset.utils.ConcatDataset
+            datasets:
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/GraSP/train/images
+                  gt_folder: ./data/GraSP/train/masks
+                  meta_folder: ./data/GraSP/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.2
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_long_mem_sampler.RandomUniformSampler
+                  num_short_frames: ${subtract:${scratch.num_frames},3}
+                  num_long_frames: 3
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/cholecinstanceseg/train/images
+                  gt_folder: ./data/cholecinstanceseg/train/masks
+                  meta_folder: ./data/cholecinstanceseg/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.02
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_long_mem_sampler.RandomUniformSampler
+                  num_short_frames: ${subtract:${scratch.num_frames},3}
+                  num_long_frames: 3
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/AutoLaparo/train/images
+                  gt_folder: ./data/AutoLaparo/train/masks
+                  meta_folder: ./data/AutoLaparo/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.34
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_long_mem_sampler.RandomUniformSampler
+                  num_short_frames: ${subtract:${scratch.num_frames},3}
+                  num_long_frames: 3
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/cholecseg8k_0508/train/images
+                  gt_folder: ./data/cholecseg8k_0508/train/masks
+                  meta_folder: ./data/cholecseg8k_0508/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.2
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_long_mem_sampler.RandomUniformSampler
+                  num_short_frames: ${subtract:${scratch.num_frames},3}
+                  num_long_frames: 3
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/DSAD/train/images
+                  gt_folder: ./data/DSAD/train/masks
+                  meta_folder: ./data/DSAD/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.2
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_long_mem_sampler.RandomUniformSampler
+                  num_short_frames: ${subtract:${scratch.num_frames},3}
+                  num_long_frames: 3
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/cvc-612/train/images
+                  gt_folder: ./data/cvc-612/train/masks
+                  meta_folder: ./data/cvc-612/train/Meta
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 2
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_long_mem_sampler.RandomUniformSampler
+                  num_short_frames: ${subtract:${scratch.num_frames},3}
+                  num_long_frames: 3
+                  max_num_objects: ${scratch.max_num_objects}
+                  reverse_time_prob: 0.25
+                  step_length: 1
+                  use_tissue_text: ${scratch.use_tissue_text}
+                multiplier: 1
+        - _target_: training.dataset.utils.RepeatFactorWrapper
+          dataset:
+            _target_: training.dataset.utils.ConcatDataset
+            datasets:
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/endoscapes/train/images
+                  gt_folder: ./data/endoscapes/train/masks
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.4
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: 1
+                  max_num_objects: 3
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/kvasir/train/images
+                  gt_folder: ./data/kvasir/train/masks
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.4
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: 1
+                  max_num_objects: 3
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/bkai/train/images
+                  gt_folder: ./data/bkai/train/masks
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.4
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: 1
+                  max_num_objects: 3
+                multiplier: 1
+              - _target_: training.dataset.vos_dataset.VOSDataset
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+                  img_folder: ./data/DSAD_prompt/train/images
+                  gt_folder: ./data/DSAD_prompt/train/masks
+                  file_list_txt: null
+                  used_object_ids: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                  frames_sampling_mult: True
+                  mult_ratio: 0.2
+                  sample_rate: 1
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: 1
+                  max_num_objects: 3
+                multiplier: 1
+
+      shuffle: True
+      num_workers: ${scratch.num_train_workers}
+      pin_memory: True
+      drop_last: True
+      collate_fn:
+        _target_: training.utils.data_utils.collate_fn
+        _partial_: true
+        dict_key: all

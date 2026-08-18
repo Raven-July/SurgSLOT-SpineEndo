@@ -19,6 +19,7 @@ USE_CLS_INFERENCE="${USE_CLS_INFERENCE:-1}"
 USE_CONTINUOUS_DIVEMEM="${USE_CONTINUOUS_DIVEMEM:-1}"
 APPLY_POSTPROCESSING="${APPLY_POSTPROCESSING:-0}"
 KEEP_VIDEO_ON_GPU="${KEEP_VIDEO_ON_GPU:-0}"
+DEBUG_LONG_MEM="${DEBUG_LONG_MEM:-0}"
 
 NUM_LONG_MEM_FRAMES="${NUM_LONG_MEM_FRAMES:-3}"
 NUM_LONG_MEM_CANDIDATES="${NUM_LONG_MEM_CANDIDATES:-5}"
@@ -27,15 +28,27 @@ PROTO_UPDATE_THR="${PROTO_UPDATE_THR:-0.9}"
 EMA_ALPHA_PROTO="${EMA_ALPHA_PROTO:-0.95}"
 SHORT_MEM_FRAMES="${SHORT_MEM_FRAMES:-6}"
 
-# Override with, for example: DATASETS="VOS-Endovis17 VOS-Endovis18".
-read -r -a DATASET_LIST <<< "${DATASETS:-VOS-Endovis17 VOS-Endovis18 SurgicalAI3K polypgen Hyst-YT RARP50 NUH-Hyst}"
+# Datasets used by the original SurgSLOT/SAM2 evaluation scripts.
+# Set DATASETS to a space-separated subset when running only selected datasets.
+DATASET_LIST=(
+  "VOS-Endovis17"
+  "VOS-Endovis18"
+  "SurgicalAI3K"
+  "polypgen"
+  "Hyst-YT"
+  "RARP50"
+  "NUH-Hyst"
+)
+if [[ -n "${DATASETS:-}" ]]; then
+  read -r -a DATASET_LIST <<< "${DATASETS}"
+fi
 
 PROMPT_CONFIGS=(
-  "mask,0,mask"
-  "point,1,point_1"
+#  "mask,0,mask"
+#  "point,1,point_1"
   "point,3,point_3"
-  "point,5,point_5"
-  "box,0,box"
+#  "point,5,point_5"
+#  "box,0,box"
 )
 
 if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
@@ -57,7 +70,13 @@ fi
 
 mkdir -p "${OUTPUT_DIR}"
 
-RUN_NAME="${RUN_NAME:-lm${NUM_LONG_MEM_FRAMES}_cand${NUM_LONG_MEM_CANDIDATES}_iou${LONG_MEM_IOU_THR}_proto${PROTO_UPDATE_THR}_ema${EMA_ALPHA_PROTO}_short${SHORT_MEM_FRAMES}}"
+# Keep implementation details out of the result directory name. Set RUN_NAME to
+# a custom label when multiple runs need to be kept side by side.
+RUN_NAME="${RUN_NAME:-}"
+RUN_NAME_SUFFIX=""
+if [[ -n "${RUN_NAME}" ]]; then
+  RUN_NAME_SUFFIX="_${RUN_NAME}"
+fi
 
 COMMON_ARGS=(
   --sam2_cfg "${SAM2_CFG}"
@@ -94,21 +113,12 @@ fi
 if [[ "${KEEP_VIDEO_ON_GPU}" == "1" ]]; then
   COMMON_ARGS+=(--keep_video_on_gpu)
 fi
-
-dataset_json=""
-cleanup() {
-  if [[ -n "${dataset_json}" && -f "${dataset_json}" ]]; then
-    rm -f -- "${dataset_json}"
-  fi
-}
-trap cleanup EXIT
+if [[ "${DEBUG_LONG_MEM}" == "1" ]]; then
+  COMMON_ARGS+=(--debug_long_mem)
+fi
 
 for prompt_config in "${PROMPT_CONFIGS[@]}"; do
   IFS=',' read -r prompt_type num_pts prompt_dir <<< "${prompt_config}"
-  dataset_json="$(mktemp "${TMPDIR:-/tmp}/surgslot_datasets_XXXXXX.json")"
-
-  printf '[\n' > "${dataset_json}"
-  first=1
   for dataset_name in "${DATASET_LIST[@]}"; do
     base_video_dir="${DATA_ROOT}/${dataset_name}/test/images"
     if [[ "${dataset_name}" == "RARP50" ]]; then
@@ -117,7 +127,7 @@ for prompt_config in "${PROMPT_CONFIGS[@]}"; do
       input_mask_dir="${DATA_ROOT}/${dataset_name}/test/vos/Annotations"
     fi
     gt_root="${DATA_ROOT}/${dataset_name}/test/masks"
-    output_mask_dir="${OUTPUT_DIR}/${dataset_name}/${prompt_dir}_${RUN_NAME}"
+    output_mask_dir="${OUTPUT_DIR}/${dataset_name}/${prompt_dir}${RUN_NAME_SUFFIX}"
     benchmark_type="generic"
     if [[ "${dataset_name}" == "VOS-Endovis18" ]]; then
       benchmark_type="endovis2018"
@@ -130,30 +140,23 @@ for prompt_config in "${PROMPT_CONFIGS[@]}"; do
       fi
     done
 
-    if [[ "${first}" == "0" ]]; then
-      printf ',\n' >> "${dataset_json}"
-    fi
-    first=0
-    printf '  {"base_video_dir":"%s","input_mask_dir":"%s","output_mask_dir":"%s","gt_root":"%s","benchmark_type":"%s"}' \
-      "${base_video_dir}" "${input_mask_dir}" "${output_mask_dir}" "${gt_root}" "${benchmark_type}" >> "${dataset_json}"
+    command=(
+      "${PYTHON_BIN}"
+      tools/vos_inference_surgslot.py
+      --base_video_dir "${base_video_dir}"
+      --input_mask_dir "${input_mask_dir}"
+      --output_mask_dir "${output_mask_dir}"
+      --gt_root "${gt_root}"
+      --benchmark_type "${benchmark_type}"
+      --prompt_type "${prompt_type}"
+      --num_pts "${num_pts}"
+      "${COMMON_ARGS[@]}"
+      "$@"
+    )
+
+    printf 'Running:'
+    printf ' %q' "${command[@]}"
+    printf '\n'
+    "${command[@]}"
   done
-  printf '\n]\n' >> "${dataset_json}"
-
-  command=(
-    "${PYTHON_BIN}"
-    tools/vos_inference_surgslot.py
-    --dataset_list_json "${dataset_json}"
-    --prompt_type "${prompt_type}"
-    --num_pts "${num_pts}"
-    "${COMMON_ARGS[@]}"
-    "$@"
-  )
-
-  printf 'Running:'
-  printf ' %q' "${command[@]}"
-  printf '\n'
-  "${command[@]}"
-
-  rm -f -- "${dataset_json}"
-  dataset_json=""
 done

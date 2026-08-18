@@ -133,7 +133,6 @@ def vos_separate_inference_per_object(
     video_name,
     score_thresh=0.0,
     use_all_masks=False,
-    read_frame_interval=1,
     save_frame_interval=1,
     prompt_type='mask',
     num_pts=1,
@@ -154,12 +153,10 @@ def vos_separate_inference_per_object(
         for p in os.listdir(video_dir)
         if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", '.png']
     ]
-    # only process frames with frame_interval
-    frame_names = [p for p in all_frame_names if int(os.path.splitext(p)[0]) % read_frame_interval == 0]
-    # save_pred_freq = len(all_frame_names) // len(frame_names)
-    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+    # The release inference path processes every frame.
+    frame_names = sorted(all_frame_names, key=lambda p: int(os.path.splitext(p)[0]))
     inference_state = predictor.init_state(
-        video_path=video_dir, async_loading_frames=False, frame_interval=read_frame_interval,
+        video_path=video_dir, async_loading_frames=False,
         offload_video_to_cpu=offload_video_to_cpu,
     )
     height = inference_state["video_height"]
@@ -491,6 +488,11 @@ def main():
         help="number of most-recent short-term memory frames to attend to (default: 6)",
     )
     parser.add_argument(
+        "--debug_long_mem",
+        action="store_true",
+        help="print long-term memory selection and eviction details",
+    )
+    parser.add_argument(
         "--gt_root",
         default=None,
         help="Path to the GT folder. For SA-V, it's sav_val/Annotations_6fps or sav_test/Annotations_6fps",
@@ -504,10 +506,6 @@ def main():
     parser.add_argument(
         "--gpu_id",
         type=int, default=0,
-    )
-    parser.add_argument(
-        "--read_frame_interval",
-        type=int, default=1,
     )
     parser.add_argument(
         "--save_frame_interval",
@@ -565,12 +563,13 @@ def main():
         num_long_mem_candidate=args.num_long_mem_candidate,
         long_mem_iou_thr=args.long_mem_iou_thr,
         hydra_overrides_extra=[],
-        strict_loading=True,
+        strict_loading=False,
         use_cls_inference=args.use_cls_inference,
         use_continuous_divemem=args.use_continuous_divemem,
         proto_update_thr=args.proto_update_thr,
         ema_alpha_proto=args.ema_alpha_proto,
         short_mem_frames=args.short_term_frame_num,
+        debug_long_mem=args.debug_long_mem,
     )
 
     # Build the list of dataset configs to run (model is loaded only once above)
@@ -626,7 +625,6 @@ def main():
                 video_name=video_name,
                 score_thresh=args.score_thresh,
                 use_all_masks=args.use_all_masks,
-                read_frame_interval=args.read_frame_interval,
                 save_frame_interval=args.save_frame_interval,
                 prompt_type=args.prompt_type,
                 num_pts=args.num_pts,

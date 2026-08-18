@@ -68,6 +68,8 @@ class PNGRawDataset(VOSRawDataset):
         single_object_mode=False,
         truncate_video=-1,
         frames_sampling_mult=False,
+        used_object_ids=None,
+        mult_ratio=1,
     ):
         self.img_folder = img_folder
         self.gt_folder = gt_folder
@@ -76,13 +78,20 @@ class PNGRawDataset(VOSRawDataset):
         self.is_palette = is_palette
         self.single_object_mode = single_object_mode
         self.truncate_video = truncate_video
+        self.valid_obj_ids = (
+            None
+            if used_object_ids is None
+            else set(int(object_id) for object_id in used_object_ids)
+        )
 
         # Read the subset defined in file_list_txt
         if file_list_txt is not None:
             with g_pathmgr.open(file_list_txt, "r") as f:
                 subset = [os.path.splitext(line.strip())[0] for line in f]
         else:
-            subset = os.listdir(self.img_folder)
+            # The annotation folders define the valid video subset. This keeps
+            # image and mask videos aligned when one side contains extras.
+            subset = os.listdir(self.gt_folder)
 
         # Read and process excluded files if provided
         if excluded_videos_list_txt is not None:
@@ -109,7 +118,8 @@ class PNGRawDataset(VOSRawDataset):
         if frames_sampling_mult:
             video_names_mult = []
             for video_name in self.video_names:
-                num_frames = len(os.listdir(os.path.join(self.img_folder, video_name)))
+                num_frames = len(os.listdir(os.path.join(self.gt_folder, video_name)))
+                num_frames = max(1, int(num_frames * mult_ratio))
                 video_names_mult.extend([video_name] * num_frames)
             self.video_names = video_names_mult
 
@@ -129,13 +139,52 @@ class PNGRawDataset(VOSRawDataset):
         video_mask_root = os.path.join(self.gt_folder, video_name)
 
         if self.is_palette:
-            segment_loader = PalettisedPNGSegmentLoader(video_mask_root)
+            segment_loader = PalettisedPNGSegmentLoader(
+                video_mask_root,
+                valid_obj_ids=self.valid_obj_ids,
+            )
         else:
             segment_loader = MultiplePNGSegmentLoader(
                 video_mask_root, self.single_object_mode
             )
 
-        all_frames = sorted(glob.glob(os.path.join(video_frame_root, "*.jpg")))
+        image_paths_by_id = {}
+        for pattern in (
+            "*.jpg",
+            "*.jpeg",
+            "*.JPG",
+            "*.JPEG",
+            "*.png",
+            "*.PNG",
+        ):
+            for image_path in glob.glob(os.path.join(video_frame_root, pattern)):
+                frame_id = int(os.path.splitext(os.path.basename(image_path))[0])
+                # Prefer the first matching extension if duplicate files exist.
+                image_paths_by_id.setdefault(frame_id, image_path)
+
+        # Follow the original loader: annotation frame IDs are authoritative.
+        # This prevents sampling image-only frames that have no corresponding
+        # target mask, which would otherwise raise KeyError in the segment
+        # loader. Palette masks are stored directly under video_mask_root;
+        # multiple-object masks are stored one level below it.
+        if self.is_palette or self.single_object_mode:
+            annotation_roots = [video_mask_root]
+        else:
+            annotation_roots = [
+                root
+                for root in glob.glob(os.path.join(video_mask_root, "*"))
+                if os.path.isdir(root)
+            ]
+        annotation_frame_ids = set()
+        for annotation_root in annotation_roots:
+            for filename in os.listdir(annotation_root):
+                stem, _ = os.path.splitext(filename)
+                try:
+                    annotation_frame_ids.add(int(stem))
+                except ValueError:
+                    continue
+        frame_ids = sorted(set(image_paths_by_id) & annotation_frame_ids)
+        all_frames = [image_paths_by_id[frame_id] for frame_id in frame_ids]
         if self.truncate_video > 0:
             all_frames = all_frames[: self.truncate_video]
         frames = []
@@ -178,7 +227,9 @@ class SA1BRawDataset(VOSRawDataset):
         else:
             subset = os.listdir(self.img_folder)
             subset = [
-                path.split(".")[0] for path in subset if path.endswith(".jpg")
+                path.split(".")[0]
+                for path in subset
+                if path.endswith(".jpg") or path.endswith(".png")
             ]  # remove extension
 
         # Read and process excluded files if provided

@@ -157,7 +157,12 @@ def build_surgslot_video_predictor(
     proto_update_thr=0.9,
     ema_alpha_proto=0.95,
     short_mem_frames=6,
-    strict_loading=True,
+    debug_long_mem=False,
+    # Training checkpoints can contain training-only modules (for example the
+    # frozen CLIP text encoder) or omit parameters that were intentionally not
+    # saved.  Inference should load the compatible parameters and report the
+    # differences instead of failing on those keys.
+    strict_loading=False,
 ):
     """Build a SurgSLOT video predictor for evaluation."""
     hydra_overrides = [
@@ -205,6 +210,7 @@ def build_surgslot_video_predictor(
     )
 
     hydra_overrides.append(f"++model.short_mem_frames={short_mem_frames}")
+    hydra_overrides.append(f"++model.debug_long_mem={str(debug_long_mem).lower()}")
 
     cfg = compose(config_name=config_file, overrides=hydra_overrides)
     OmegaConf.resolve(cfg)
@@ -241,14 +247,19 @@ def _load_checkpoint(model, ckpt_path, strict=True):
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         sd = checkpoint.get("model", checkpoint)
         missing_keys, unexpected_keys = model.load_state_dict(sd, strict=strict)
-        if missing_keys:
-            log = logging.error if strict else logging.warning
-            log("Missing checkpoint keys: %s", missing_keys)
+        if missing_keys or unexpected_keys:
             if strict:
-                raise RuntimeError()
-        if unexpected_keys:
-            log = logging.error if strict else logging.warning
-            log("Unexpected checkpoint keys: %s", unexpected_keys)
-            if strict:
-                raise RuntimeError()
+                logging.error("Missing checkpoint keys: %s", missing_keys)
+                logging.error("Unexpected checkpoint keys: %s", unexpected_keys)
+                raise RuntimeError(
+                    "Checkpoint keys do not match the model in strict mode."
+                )
+            logging.warning(
+                "Loaded checkpoint non-strictly: %d missing key(s) %s; "
+                "%d unexpected key(s) %s",
+                len(missing_keys),
+                missing_keys,
+                len(unexpected_keys),
+                unexpected_keys,
+            )
         logging.info("Loaded checkpoint successfully")
