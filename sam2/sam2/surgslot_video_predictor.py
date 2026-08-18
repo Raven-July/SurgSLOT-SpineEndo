@@ -6,17 +6,19 @@
 
 import warnings
 from collections import OrderedDict
+from sam2.utils.limited_list import QueueList as qlist
 
 import torch
 import torch.nn.functional as F
 
 from tqdm import tqdm
 
-from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
+from sam2.modeling.surgslot_base import NO_OBJ_SCORE, SurgSLOTBase
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
+from sam2.modeling.sam2_utils import get_1d_sine_pe, select_closest_cond_frames
 
 
-class SAM2VideoPredictor(SAM2Base):
+class SurgSLOTVideoPredictor(SurgSLOTBase):
     """The predictor class to handle user interactions and manage inference states."""
 
     def __init__(
@@ -30,13 +32,47 @@ class SAM2VideoPredictor(SAM2Base):
         # if `add_all_frames_to_correct_as_cond` is True, we also append to the conditioning frame list any frame that receives a later correction click
         # if `add_all_frames_to_correct_as_cond` is False, we conditioning frame list to only use those initial conditioning frames
         add_all_frames_to_correct_as_cond=False,
+        # SurgSLOT uses semantic class tokens and shared temporal encodings by default.
+        use_cls_tokens=True,
+        use_long_mem_tpos_enc=True,
+        use_long_term_memory=True,
+        num_long_mem_frame=3,
+        num_long_mem_candidate=5,
+        long_mem_iou_thr=0.9,
+        use_iou_to_find_long_mem=True,
+        use_cls_inference=True,
+        use_continuous_divemem=True,
+        proto_update_thr=0.9,
+        ema_alpha_proto=0.95,
+        short_mem_frames=6,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(
+            use_cls_tokens=use_cls_tokens,
+            use_long_mem_tpos_enc=use_long_mem_tpos_enc,
+            **kwargs,
+        )
         self.fill_hole_area = fill_hole_area
         self.non_overlap_masks = non_overlap_masks
         self.clear_non_cond_mem_around_input = clear_non_cond_mem_around_input
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
+        self.use_long_term_memory = use_long_term_memory
+        self.num_long_mem_frame = num_long_mem_frame
+        self.num_long_mem_candidate = num_long_mem_candidate
+        self.long_mem_iou_thr = long_mem_iou_thr
+        self.use_iou_to_find_long_mem = use_iou_to_find_long_mem
+        self.use_cls_inference = use_cls_inference
+        self.use_continuous_divemem = use_continuous_divemem
+        self.proto_update_thr = proto_update_thr
+        self.ema_alpha_proto = ema_alpha_proto
+        self.short_mem_frames = short_mem_frames
+        if use_long_term_memory and use_iou_to_find_long_mem and proto_update_thr > long_mem_iou_thr:
+            warnings.warn(
+                f"proto_update_thr ({proto_update_thr}) > long_mem_iou_thr ({long_mem_iou_thr}): "
+                f"a frame can enter the candidate pool without initializing the prototype, "
+                f"which may trigger the assert in _prepare_memory_conditioned_features. "
+                f"Set proto_update_thr <= long_mem_iou_thr to avoid this."
+            )
 
     @torch.inference_mode()
     def init_state(
@@ -45,6 +81,7 @@ class SAM2VideoPredictor(SAM2Base):
         offload_video_to_cpu=False,
         offload_state_to_cpu=False,
         async_loading_frames=False,
+        frame_interval=1,
     ):
         """Initialize an inference state."""
         compute_device = self.device  # device of the model
@@ -54,6 +91,7 @@ class SAM2VideoPredictor(SAM2Base):
             offload_video_to_cpu=offload_video_to_cpu,
             async_loading_frames=async_loading_frames,
             compute_device=compute_device,
+            frame_interval=frame_interval
         )
         inference_state = {}
         inference_state["images"] = images
@@ -99,7 +137,7 @@ class SAM2VideoPredictor(SAM2Base):
         return inference_state
 
     @classmethod
-    def from_pretrained(cls, model_id: str, **kwargs) -> "SAM2VideoPredictor":
+    def from_pretrained(cls, model_id: str, **kwargs) -> "SAM2SemanticVideoPredictor":
         """
         Load a pretrained model from the Hugging Face hub.
 
@@ -108,7 +146,7 @@ class SAM2VideoPredictor(SAM2Base):
           **kwargs: Additional arguments to pass to the model constructor.
 
         Returns:
-          (SAM2VideoPredictor): The loaded model.
+          (SAM2SemanticVideoPredictor): The loaded model.
         """
         from sam2.build_sam import build_sam2_video_predictor_hf
 
@@ -135,6 +173,9 @@ class SAM2VideoPredictor(SAM2Base):
             inference_state["output_dict_per_obj"][obj_idx] = {
                 "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
                 "non_cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
+                "long_mem": qlist(maxlen=self.num_long_mem_frame),
+                "long_mem_candidate": qlist(maxlen=self.num_long_mem_candidate),
+                "prototype": None,  # EMA prototype of cls tokens from high-quality frames
             }
             inference_state["temp_output_dict_per_obj"][obj_idx] = {
                 "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
@@ -580,7 +621,9 @@ class SAM2VideoPredictor(SAM2Base):
             )
             processing_order = range(start_frame_idx, end_frame_idx + 1)
 
-        for frame_idx in tqdm(processing_order, desc="propagate in video"):
+        for frame_idx in tqdm(processing_order, disable=True, desc="propagate in video"):
+        # for frame_idx in tqdm(processing_order, disable=False, desc="propagate in video"):
+
             pred_masks_per_obj = [None] * batch_size
             for obj_idx in range(batch_size):
                 obj_output_dict = inference_state["output_dict_per_obj"][obj_idx]
@@ -598,6 +641,7 @@ class SAM2VideoPredictor(SAM2Base):
                         self._clear_obj_non_cond_mem_around_input(
                             inference_state, frame_idx, obj_idx
                         )
+
                 else:
                     storage_key = "non_cond_frame_outputs"
                     current_out, pred_masks = self._run_single_frame_inference(
@@ -613,10 +657,45 @@ class SAM2VideoPredictor(SAM2Base):
                     )
                     obj_output_dict[storage_key][frame_idx] = current_out
 
+                    # Prototype: init from first non-cond frame, then EMA update + sim logging
+                    cur_cls_proto = current_out.get("out_cls_tokens", None)
+                    if cur_cls_proto is not None:
+                        cur_vec_proto = F.normalize(
+                            cur_cls_proto.float().reshape(cur_cls_proto.shape[0], -1), dim=-1
+                        )
+                        prototype = obj_output_dict.get("prototype")
+                        cur_ious_proto = current_out.get("ious", None)
+                        cur_iou_proto = float(torch.max(cur_ious_proto).item()) if cur_ious_proto is not None else None
+                        cur_obj_score_logits = current_out.get("object_score_logits", None)
+                        cur_obj_score = cur_obj_score_logits.sigmoid().mean().item() if cur_obj_score_logits is not None else None
+                        cur_confidence = (cur_obj_score * cur_iou_proto) if (cur_iou_proto is not None and cur_obj_score is not None) else None
+
+                        if prototype is None:
+                            # Gate init: only seed prototype when this frame is high-quality,
+                            # matching the training gate (GT_iou > confidence_cls).
+                            if cur_confidence is not None and cur_confidence > self.proto_update_thr:
+                                obj_output_dict["prototype"] = cur_vec_proto.detach().clone()
+                        else:
+                            proto_sim = (cur_vec_proto * prototype).sum(dim=-1).mean()
+                            conf_msg = f"{cur_confidence:.4f}" if cur_confidence is not None else "None"
+                            obj_id = inference_state["obj_idx_to_id"][obj_idx]
+                            iou_msg = f"{cur_iou_proto:.4f}" if cur_iou_proto is not None else "None"
+                            obj_score_msg = f"{cur_obj_score:.4f}" if cur_obj_score is not None else "None"
+                            # print(
+                            #     f"[obj={obj_id} frame={frame_idx}] "
+                            #     f"proto-sim={float(proto_sim.item()):.4f}, iou={iou_msg}, object_score={obj_score_msg}, confidence={conf_msg}"
+                            # )
+                            # EMA update only when confidence > threshold
+                            if cur_confidence is not None and cur_confidence > self.proto_update_thr:
+                                updated = self.ema_alpha_proto * prototype + (1 - self.ema_alpha_proto) * cur_vec_proto.detach()
+                                obj_output_dict["prototype"] = F.normalize(updated, dim=-1)
+
+
                 inference_state["frames_tracked_per_obj"][obj_idx][frame_idx] = {
                     "reverse": reverse
                 }
                 pred_masks_per_obj[obj_idx] = pred_masks
+
 
             # Resize the output mask to the original video resolution (we directly use
             # the mask scores on GPU for output to avoid any CPU conversion in between)
@@ -695,6 +774,9 @@ class SAM2VideoPredictor(SAM2Base):
         for v in inference_state["output_dict_per_obj"].values():
             v["cond_frame_outputs"].clear()
             v["non_cond_frame_outputs"].clear()
+            v["long_mem"].clear()
+            v["long_mem_candidate"].clear()
+            v["prototype"] = None
         for v in inference_state["temp_output_dict_per_obj"].values():
             v["cond_frame_outputs"].clear()
             v["non_cond_frame_outputs"].clear()
@@ -733,6 +815,324 @@ class SAM2VideoPredictor(SAM2Base):
         features = self._prepare_backbone_features(expanded_backbone_out)
         features = (expanded_image,) + features
         return features
+
+    # Override inference-time conditioned-feature preparation to include long-term memory.
+    def _prepare_memory_conditioned_features(
+        self,
+        frame_idx,
+        is_init_cond_frame,
+        current_vision_feats,
+        current_vision_pos_embeds,
+        feat_sizes,
+        output_dict,
+        num_frames,
+        track_in_reverse=False,  # tracking in reverse time order (for demo usage)
+    ):
+        """Fuse the current frame's visual feature map with previous memory."""
+        B = current_vision_feats[-1].size(1)  # batch size on this frame
+        C = self.hidden_dim
+        H, W = feat_sizes[-1]  # top-level (lowest-resolution) feature size
+        device = current_vision_feats[-1].device
+        # The case of `self.num_maskmem == 0` below is primarily used for reproducing SAM on images.
+        # In this case, we skip the fusion with any memory.
+        if self.num_maskmem == 0:  # Disable memory and skip fusion
+            pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
+            return pix_feat
+
+        num_obj_ptr_tokens = 0
+        tpos_sign_mul = -1 if track_in_reverse else 1
+        # Step 1: condition the visual features of the current frame on previous memories
+        if not is_init_cond_frame:
+            # NOTE: Initialize long-term memory here.
+            # First use IoU to decide whether frame_idx - 1 enters the candidate pool.
+            # Once the pool reaches its configured size, add the candidate that differs
+            # most from the previous long-term frame, or from the conditioning frame when
+            # the long-term queue is empty.
+            prev_frame_idx = frame_idx - 1
+
+            if self.use_long_term_memory and prev_frame_idx % self.memory_temporal_stride_for_eval == 0:
+                prev_output = output_dict["non_cond_frame_outputs"].get(prev_frame_idx, None)
+                if prev_output is not None:
+                    if self.use_iou_to_find_long_mem:
+                        prev_iou = torch.max(prev_output['ious'])
+                        prev_obj_score_logits = prev_output.get('object_score_logits', None)
+                        if prev_obj_score_logits is not None:
+                            prev_confidence = prev_obj_score_logits.sigmoid().mean() * prev_iou
+                        else:
+                            prev_confidence = prev_iou
+                        if prev_confidence > self.long_mem_iou_thr:
+                            output_dict["long_mem_candidate"].append((prev_frame_idx, prev_confidence))
+                        elif self.use_continuous_divemem:
+                            output_dict["long_mem_candidate"].clear()
+                    else:
+                        output_dict["long_mem_candidate"].append((prev_frame_idx, 1))
+
+                # NOTE: When the candidate pool reaches its configured size, select one
+                # frame for long_mem. Choose the frame with the highest similarity to the
+                # current prototype, clear long_mem_candidate, and evict the least
+                # consistent frame when necessary.
+                if len(output_dict["long_mem_candidate"]) == self.num_long_mem_candidate:
+                    # Select candidate with highest proto-sim to the current prototype
+                    prototype = output_dict.get("prototype")
+                    best_frame_idx, best_sim = None, -float("inf")
+                    for (cand_frame_idx, _) in output_dict["long_mem_candidate"]:
+                        cand_out = output_dict["non_cond_frame_outputs"].get(cand_frame_idx, None)
+                        assert cand_out is not None, "Candidate output should be ready when using long-term memory in evaluation"
+                        cand_cls = cand_out.get("out_cls_tokens", None)
+                        cand_vec = F.normalize(
+                            cand_cls.float().reshape(cand_cls.shape[0], -1), dim=-1
+                        )
+                        sim = float((cand_vec * prototype).sum(dim=-1).mean().item())
+                        if sim > best_sim:
+                            best_sim, best_frame_idx = sim, cand_frame_idx
+                    if best_frame_idx is None:
+                        best_frame_idx, _ = max(output_dict["long_mem_candidate"], key=lambda x: x[1])
+                        best_sim = float("nan")
+                    selected_frame_idx = best_frame_idx
+                    print(
+                        f"long-term memory frame {selected_frame_idx} is selected "
+                        f"(proto-sim={best_sim:.4f})"
+                    )
+
+                    if prototype is not None:
+                        # NOTE: Evict the frame least similar to the prototype, including
+                        # the candidate itself when it is the worst match.
+                        if len(output_dict["long_mem"]) >= self.num_long_mem_frame:
+                            worst_sim, worst_pos = float("inf"), 0
+                            for i, lm_fidx in enumerate(output_dict["long_mem"]):
+                                lm_out = output_dict["non_cond_frame_outputs"].get(lm_fidx, None)
+                                lm_cls = lm_out.get("out_cls_tokens", None) if lm_out is not None else None
+                                assert lm_out is not None, "lm_out should be ready when using long-term memory in evaluation"
+                                lm_vec = F.normalize(lm_cls.float().reshape(lm_cls.shape[0], -1), dim=-1)
+                                sim = float((lm_vec * prototype).sum(dim=-1).mean().item())
+                                if sim < worst_sim:
+                                    worst_sim, worst_pos = sim, i
+                            if best_sim <= worst_sim:
+                                # candidate is worst — discard it, keep long_mem unchanged
+                                print(
+                                    f"long_mem candidate frame {selected_frame_idx} discarded "
+                                    f"(proto-sim={best_sim:.4f} <= worst existing={worst_sim:.4f})"
+                                )
+                            else:
+                                evicted_fidx = output_dict["long_mem"][worst_pos]
+                                output_dict["long_mem"].pop(worst_pos)
+                                output_dict["long_mem"].append(selected_frame_idx)
+                                print(
+                                    f"long_mem evicted frame {evicted_fidx} (proto-sim={worst_sim:.4f}), "
+                                    f"added frame {selected_frame_idx} (proto-sim={best_sim:.4f})"
+                                )
+                        else:
+                            output_dict["long_mem"].append(selected_frame_idx)
+                        output_dict["long_mem_candidate"].clear()
+
+
+            # Retrieve the memories encoded with the maskmem backbone
+            to_cat_memory, to_cat_memory_pos_embed = [], []
+
+            # Step 1: Select the nearest conditioning frame.
+            # Add conditioning frames's output first (all cond frames have t_pos=0 for
+            # when getting temporal positional embedding below)
+            assert len(output_dict["cond_frame_outputs"]) > 0
+            # Select a maximum number of temporally closest cond frames for cross attention
+            cond_outputs = output_dict["cond_frame_outputs"]
+            selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames(
+                frame_idx, cond_outputs, self.max_cond_frames_in_attn
+            )
+            t_pos_and_prevs = [(0, out) for out in selected_cond_outputs.values()]
+
+            # Step 2: Select the nearest non-conditioning frames.
+            # Add last (self.num_maskmem - 1) frames before current frame for non-conditioning memory
+            # the earliest one has t_pos=1 and the latest one has t_pos=self.num_maskmem-1
+            # We also allow taking the memory frame non-consecutively (with stride>1), in which case
+            # we take (self.num_maskmem - 2) frames among every stride-th frames plus the last frame.
+            # Step 2.1: Retrieve each recent non-conditioning frame and its output, then
+            # assign its temporal position t_pos in memory.
+            stride = 1 if self.training else self.memory_temporal_stride_for_eval
+            short_mem = []
+
+            if self.use_short_memory_selection:
+                valid_indices = self.frame_filter(
+                    output_dict, track_in_reverse, frame_idx, num_frames, stride
+                )
+
+            for t_pos in range(self.num_maskmem - self.short_mem_frames, self.num_maskmem):
+                t_rel = self.num_maskmem - t_pos  # how many frames before current frame
+                # SAM3-style short-memory behavior.
+                if self.use_short_memory_selection:
+                    if t_rel > len(valid_indices):
+                        continue
+                    prev_frame_idx = valid_indices[-t_rel]
+                    short_mem.append(prev_frame_idx)
+                else:
+                    if t_rel == 1:
+                        # for t_rel == 1, we take the last frame (regardless of r)
+                        if not track_in_reverse:
+                            # the frame immediately before this frame (i.e. frame_idx - 1)
+                            prev_frame_idx = frame_idx - t_rel
+                        else:
+                            # the frame immediately after this frame (i.e. frame_idx + 1)
+                            prev_frame_idx = frame_idx + t_rel
+                    else:
+                        # for t_rel >= 2, we take the memory frame from every r-th frames
+                        if not track_in_reverse:
+                            # first find the nearest frame among every r-th frames before this frame
+                            # for r=1, this would be (frame_idx - 2)
+                            prev_frame_idx = ((frame_idx - 2) // stride) * stride
+                            # then seek further among every r-th frames
+                            prev_frame_idx = prev_frame_idx - (t_rel - 2) * stride
+                        else:
+                            # first find the nearest frame among every r-th frames after this frame
+                            # for r=1, this would be (frame_idx + 2)
+                            prev_frame_idx = -(-(frame_idx + 2) // stride) * stride
+                            # then seek further among every r-th frames
+                            prev_frame_idx = prev_frame_idx + (t_rel - 2) * stride
+
+                out = output_dict["non_cond_frame_outputs"].get(prev_frame_idx, None)
+                if out is None:
+                    # If an unselected conditioning frame is among the last (self.num_maskmem - 1)
+                    # frames, we still attend to it as if it's a non-conditioning frame.
+                    out = unselected_cond_outputs.get(prev_frame_idx, None)
+                t_pos_and_prevs.append((t_pos, out))
+                short_mem.append(prev_frame_idx)
+
+            # Step 2.2: Retrieve maskmem_features and maskmem_pos_enc using t_pos.
+            for t_pos, prev in t_pos_and_prevs:
+                if prev is None:
+                    continue  # skip padding frames
+                # "maskmem_features" might have been offloaded to CPU in demo use cases,
+                # so we load it back to GPU (it's a no-op if it's already on GPU).
+                feats = prev["maskmem_features"].to(device, non_blocking=True)
+                to_cat_memory.append(feats.flatten(2).permute(2, 0, 1))
+                # Spatial positional encoding (it might have been offloaded to CPU in eval)
+                maskmem_enc = prev["maskmem_pos_enc"][-1].to(device)
+                maskmem_enc = maskmem_enc.flatten(2).permute(2, 0, 1)
+                # Temporal positional encoding
+                maskmem_enc = maskmem_enc + self.maskmem_tpos_enc[self.num_maskmem - t_pos - 1]
+                # t_pos 1 is the farthest memory, 6 is the nearest, and 0 is conditioning.
+                to_cat_memory_pos_embed.append(maskmem_enc)
+
+            # Step 3: Add long-term memory; all of these entries are non-conditioning frames.
+            if self.use_long_term_memory:
+                for long_mem_frame_idx in output_dict["long_mem"]:
+                    # Do not duplicate long-term frames already present in short-term memory.
+                    if long_mem_frame_idx in short_mem:
+                        continue
+                    long_mem_output = output_dict["non_cond_frame_outputs"].get(long_mem_frame_idx, None)
+
+                    long_mem_feats = long_mem_output["maskmem_features"].to(device, non_blocking=True)
+                    to_cat_memory.append(long_mem_feats.flatten(2).permute(2, 0, 1))
+                    long_mem_pos_enc = long_mem_output["maskmem_pos_enc"][-1].to(device)
+                    long_mem_pos_enc = long_mem_pos_enc.flatten(2).permute(2, 0, 1)
+                    if self.use_long_mem_tpos_enc:
+                        # long_mem_pos_enc = long_mem_pos_enc + self.maskmem_tpos_enc[0]  # Position 0 is the nearest and most important memory.
+                        long_mem_pos_enc = long_mem_pos_enc + self.long_mem_tpos_enc[0]
+                    else:
+                        long_mem_pos_enc = long_mem_pos_enc + self.maskmem_tpos_enc[5]  # Position 0 is the nearest and most important memory.
+                    to_cat_memory_pos_embed.append(long_mem_pos_enc)
+
+            # Construct the list of past object pointers
+            if self.use_obj_ptrs_in_encoder:
+                max_obj_ptrs_in_encoder = min(num_frames, self.max_obj_ptrs_in_encoder)
+                # First add those object pointers from selected conditioning frames
+                # (optionally, only include object pointers in the past during evaluation)
+                if not self.training and self.only_obj_ptrs_in_the_past_for_eval:
+                    ptr_cond_outputs = {
+                        t: out
+                        for t, out in selected_cond_outputs.items()
+                        if (t >= frame_idx if track_in_reverse else t <= frame_idx)
+                    }
+                else:
+                    ptr_cond_outputs = selected_cond_outputs
+                # Add long_mem entries to ptr_cond_outputs.
+                if self.use_long_term_memory:
+                    for long_mem_frame_idx in output_dict["long_mem"]:
+                        long_mem_output = output_dict["non_cond_frame_outputs"].get(
+                            long_mem_frame_idx, None
+                        )
+                        if long_mem_output is not None:
+                            ptr_cond_outputs[long_mem_frame_idx] = long_mem_output
+
+                pos_and_ptrs = [
+                    # Temporal pos encoding contains how far away each pointer is from current frame
+                    (
+                        (
+                            (frame_idx - t) * tpos_sign_mul
+                            if self.use_signed_tpos_enc_to_obj_ptrs
+                            else abs(frame_idx - t)
+                        ),
+                        out["obj_ptr"],
+                    )
+                    for t, out in ptr_cond_outputs.items()
+                ]
+                # Add up to (max_obj_ptrs_in_encoder - 1) non-conditioning frames before current frame
+                for t_diff in range(1, max_obj_ptrs_in_encoder):
+                    t = frame_idx + t_diff if track_in_reverse else frame_idx - t_diff
+                    if t < 0 or (num_frames is not None and t >= num_frames):
+                        break
+                    out = output_dict["non_cond_frame_outputs"].get(
+                        t, unselected_cond_outputs.get(t, None)
+                    )
+                    if out is not None:
+                        pos_and_ptrs.append((t_diff, out["obj_ptr"]))
+                # If we have at least one object pointer, add them to the across attention
+                if len(pos_and_ptrs) > 0:
+                    pos_list, ptrs_list = zip(*pos_and_ptrs)
+                    # stack object pointers along dim=0 into [ptr_seq_len, B, C] shape
+                    obj_ptrs = torch.stack(ptrs_list, dim=0)
+                    # a temporal positional embedding based on how far each object pointer is from
+                    # the current frame (sine embedding normalized by the max pointer num).
+                    if self.add_tpos_enc_to_obj_ptrs:
+                        t_diff_max = max_obj_ptrs_in_encoder - 1
+                        tpos_dim = C if self.proj_tpos_enc_in_obj_ptrs else self.mem_dim
+                        obj_pos = torch.tensor(pos_list).to(
+                            device=device, non_blocking=True
+                        )
+                        obj_pos = get_1d_sine_pe(obj_pos / t_diff_max, dim=tpos_dim)
+                        obj_pos = self.obj_ptr_tpos_proj(obj_pos)
+                        obj_pos = obj_pos.unsqueeze(1).expand(-1, B, self.mem_dim)
+                    else:
+                        obj_pos = obj_ptrs.new_zeros(len(pos_list), B, self.mem_dim)
+                    if self.mem_dim < C:
+                        # split a pointer into (C // self.mem_dim) tokens for self.mem_dim < C
+                        obj_ptrs = obj_ptrs.reshape(
+                            -1, B, C // self.mem_dim, self.mem_dim
+                        )
+                        obj_ptrs = obj_ptrs.permute(0, 2, 1, 3).flatten(0, 1)
+                        obj_pos = obj_pos.repeat_interleave(C // self.mem_dim, dim=0)
+                    to_cat_memory.append(obj_ptrs)
+                    to_cat_memory_pos_embed.append(obj_pos)
+                    num_obj_ptr_tokens = obj_ptrs.shape[0]
+                else:
+                    num_obj_ptr_tokens = 0
+        else:
+            # for initial conditioning frames, encode them without using any previous memory
+            if self.directly_add_no_mem_embed:
+                # directly add no-mem embedding (instead of using the transformer encoder)
+                pix_feat_with_mem = current_vision_feats[-1] + self.no_mem_embed
+                pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
+                memory_cls_tokens = self.cls_tokens.expand(-1, B, -1) if self.use_cls_tokens else None
+                return pix_feat_with_mem, memory_cls_tokens
+
+            # Use a dummy token on the first frame (to avoid empty memory input to tranformer encoder)
+            to_cat_memory = [self.no_mem_embed.expand(1, B, self.mem_dim)]
+            to_cat_memory_pos_embed = [self.no_mem_pos_enc.expand(1, B, self.mem_dim)]
+
+        # Step 2: Concatenate the memories and forward through the transformer encoder
+        memory = torch.cat(to_cat_memory, dim=0)
+        memory_pos_embed = torch.cat(to_cat_memory_pos_embed, dim=0)
+
+        input_cls_tokens = self.cls_tokens.expand(-1, B, -1) if self.use_cls_tokens else None
+        pix_feat_with_mem, memory_cls_tokens = self.memory_attention(
+            curr=current_vision_feats,
+            curr_pos=current_vision_pos_embeds,
+            memory=memory,
+            memory_pos=memory_pos_embed,
+            num_obj_ptr_tokens=num_obj_ptr_tokens,
+            cls_tokens=input_cls_tokens if self.use_cls_inference else None,
+        )
+        # reshape the output (HW)BC => BCHW
+        pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
+        return pix_feat_with_mem, memory_cls_tokens
 
     def _run_single_frame_inference(
         self,
@@ -792,6 +1192,7 @@ class SAM2VideoPredictor(SAM2Base):
         # object pointer is a small tensor, so we always keep it on GPU memory for fast access
         obj_ptr = current_out["obj_ptr"]
         object_score_logits = current_out["object_score_logits"]
+        ious = current_out["ious"]
         # make a compact version of this frame's output to reduce the state size
         compact_current_out = {
             "maskmem_features": maskmem_features,
@@ -799,6 +1200,8 @@ class SAM2VideoPredictor(SAM2Base):
             "pred_masks": pred_masks,
             "obj_ptr": obj_ptr,
             "object_score_logits": object_score_logits,
+            "ious": ious,
+            "out_cls_tokens": current_out["out_cls_tokens"],
         }
         return compact_current_out, pred_masks_gpu
 
@@ -837,7 +1240,6 @@ class SAM2VideoPredictor(SAM2Base):
             inference_state, {"maskmem_pos_enc": maskmem_pos_enc}
         )
         return maskmem_features, maskmem_pos_enc
-
     def _get_maskmem_pos_enc(self, inference_state, current_out):
         """
         `maskmem_pos_enc` is the same across frames and objects, so we cache it as
@@ -972,10 +1374,8 @@ class SAM2VideoPredictor(SAM2Base):
             for t in range(frame_idx_begin, frame_idx_end + 1):
                 non_cond_frame_outputs.pop(t, None)
 
-
-class SAM2VideoPredictorVOS(SAM2VideoPredictor):
+class SurgSLOTVideoPredictorVOS(SurgSLOTVideoPredictor):
     """Optimized for the VOS setting"""
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._compile_all_components()
@@ -1096,6 +1496,7 @@ class SAM2VideoPredictorVOS(SAM2VideoPredictor):
             ious,
             sam_output_tokens,
             object_score_logits,
+            _,
         ) = self.sam_mask_decoder(
             image_embeddings=backbone_features,
             image_pe=image_pe,

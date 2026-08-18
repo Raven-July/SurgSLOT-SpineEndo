@@ -98,7 +98,6 @@ class MaskDecoder(nn.Module):
         if self.pred_obj_scores:
             self.pred_obj_score_head = nn.Linear(transformer_dim, 1)
             if pred_obj_scores_mlp:
-                # pyrefly: ignore [bad-assignment]
                 self.pred_obj_score_head = MLP(transformer_dim, transformer_dim, 1, 3)
 
         # When outputting a single mask, optionally we can dynamically fall back to the best
@@ -116,6 +115,7 @@ class MaskDecoder(nn.Module):
         multimask_output: bool,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
+        memory_cls_tokens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
@@ -127,20 +127,23 @@ class MaskDecoder(nn.Module):
           dense_prompt_embeddings (torch.Tensor): the embeddings of the mask inputs
           multimask_output (bool): Whether to return multiple masks or a single
             mask.
+          memory_cls_tokens: optional (1, B, D) semantic cls token from memory attention;
+            prepended to tokens so it attends through the TwoWayTransformer.
 
         Returns:
           torch.Tensor: batched predicted masks
           torch.Tensor: batched predictions of mask quality
           torch.Tensor: batched SAM token for mask output
+          out_cls_tokens: (1, B, D) updated cls token after decoder, or None
         """
-        # pyrefly: ignore [bad-unpacking]
-        masks, iou_pred, mask_tokens_out, object_score_logits = self.predict_masks(
+        masks, iou_pred, mask_tokens_out, object_score_logits, out_cls_tokens = self.predict_masks(
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
             dense_prompt_embeddings=dense_prompt_embeddings,
             repeat_image=repeat_image,
             high_res_features=high_res_features,
+            memory_cls_tokens=memory_cls_tokens,
         )
 
         # Select the correct mask or masks for output
@@ -164,8 +167,7 @@ class MaskDecoder(nn.Module):
             sam_tokens_out = mask_tokens_out[:, 0:1]  # [b, 1, c] shape
 
         # Prepare output
-        # pyrefly: ignore [bad-return]
-        return masks, iou_pred, sam_tokens_out, object_score_logits
+        return masks, iou_pred, sam_tokens_out, object_score_logits, out_cls_tokens
 
     def predict_masks(
         self,
@@ -175,6 +177,7 @@ class MaskDecoder(nn.Module):
         dense_prompt_embeddings: torch.Tensor,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
+        memory_cls_tokens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details."""
         # Concatenate output tokens
@@ -198,6 +201,14 @@ class MaskDecoder(nn.Module):
         )
         tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
 
+        # Prepend memory cls token so it attends through the TwoWayTransformer
+        cls_s = 0
+        if memory_cls_tokens is not None:
+            cls_tokens_in = memory_cls_tokens.transpose(0, 1)  # (1,B,D) → (B,1,D)
+            tokens = torch.cat((cls_tokens_in, tokens), dim=1)
+            cls_s = 1
+            s += 1  # shift iou/mask indices to account for cls slot
+
         # Expand per-image data in batch direction to be per-mask
         if repeat_image:
             src = torch.repeat_interleave(image_embeddings, tokens.shape[0], dim=0)
@@ -213,7 +224,7 @@ class MaskDecoder(nn.Module):
 
         # Run the transformer
         hs, src = self.transformer(src, pos_src, tokens)
-        iou_token_out = hs[:, s, :]
+        iou_token_out = hs[:, s, :]  # s already includes cls_s offset
         mask_tokens_out = hs[:, s + 1 : (s + 1 + self.num_mask_tokens), :]
 
         # Upscale mask embeddings and predict masks using the mask tokens
@@ -222,7 +233,6 @@ class MaskDecoder(nn.Module):
             upscaled_embedding = self.output_upscaling(src)
         else:
             dc1, ln1, act1, dc2, act2 = self.output_upscaling
-            # pyrefly: ignore [not-iterable]
             feat_s0, feat_s1 = high_res_features
             upscaled_embedding = act1(ln1(dc1(src) + feat_s1))
             upscaled_embedding = act2(dc2(upscaled_embedding) + feat_s0)
@@ -239,14 +249,18 @@ class MaskDecoder(nn.Module):
         # Generate mask quality predictions
         iou_pred = self.iou_prediction_head(iou_token_out)
         if self.pred_obj_scores:
-            assert s == 1
-            object_score_logits = self.pred_obj_score_head(hs[:, 0, :])
+            # obj_score_token is always one slot before iou_token (at index s-1)
+            # with cls: [cls(0), obj(1), iou(2), masks...]; s=2, s-1=1 ✓
+            # without cls: [obj(0), iou(1), masks...]; s=1, s-1=0 ✓
+            object_score_logits = self.pred_obj_score_head(hs[:, s - 1, :])
         else:
             # Obj scores logits - default to 10.0, i.e. assuming the object is present, sigmoid(10)=1
             object_score_logits = 10.0 * iou_pred.new_ones(iou_pred.shape[0], 1)
 
-        # pyrefly: ignore [bad-return]
-        return masks, iou_pred, mask_tokens_out, object_score_logits
+        # Extract updated cls token after TwoWayTransformer (shape: (1, B, D))
+        out_cls_tokens = hs[:, :1, :].transpose(0, 1) if cls_s > 0 else None
+
+        return masks, iou_pred, mask_tokens_out, object_score_logits, out_cls_tokens
 
     def _get_stability_scores(self, mask_logits):
         """

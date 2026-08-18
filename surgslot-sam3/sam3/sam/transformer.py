@@ -195,7 +195,6 @@ class Attention(nn.Module):
         num_heads: int,
         downsample_rate: int = 1,
         dropout: float = 0.0,
-        # pyrefly: ignore [bad-function-definition]
         kv_in_dim: int = None,
         use_fa3: bool = False,
     ) -> None:
@@ -294,7 +293,8 @@ class RoPEAttention(Attention):
         self.rope_k_repeat = rope_k_repeat
 
     def forward(
-        self, q: Tensor, k: Tensor, v: Tensor, num_k_exclude_rope: int = 0
+        self, q: Tensor, k: Tensor, v: Tensor, num_k_exclude_rope: int = 0,
+        num_q_exclude_rope_s: int = 0, num_k_exclude_rope_s: int = 0,
     ) -> Tensor:
         # Input projections
         q = self.q_proj(q)
@@ -307,8 +307,8 @@ class RoPEAttention(Attention):
         v = self._separate_heads(v, self.num_heads)
 
         # Apply rotary position encoding
-        w = h = math.sqrt(q.shape[-2])
-        if self.freqs_cis.shape[0] != q.shape[-2]:
+        w = h = math.sqrt(q.shape[-2] - num_q_exclude_rope_s)
+        if self.freqs_cis.shape[0] != q.shape[-2] - num_q_exclude_rope_s:
             self.freqs_cis = self.compute_cis(end_x=w, end_y=h, device=q.device)
             self.freqs_cis_real = self.freqs_cis.real
             self.freqs_cis_imag = self.freqs_cis.imag
@@ -317,17 +317,17 @@ class RoPEAttention(Attention):
 
         num_k_rope = k.size(-2) - num_k_exclude_rope
         if self.use_rope_real:
-            q, k[:, :, :num_k_rope] = apply_rotary_enc_real(
-                q,
-                k[:, :, :num_k_rope],
+            q[:, :, num_q_exclude_rope_s:], k[:, :, num_k_exclude_rope_s:num_k_rope] = apply_rotary_enc_real(
+                q[:, :, num_q_exclude_rope_s:],
+                k[:, :, num_k_exclude_rope_s:num_k_rope],
                 freqs_cis_real=self.freqs_cis_real,
                 freqs_cis_imag=self.freqs_cis_imag,
                 repeat_freqs_k=self.rope_k_repeat,
             )
         else:
-            q, k[:, :, :num_k_rope] = apply_rotary_enc(
-                q,
-                k[:, :, :num_k_rope],
+            q[:, :, num_q_exclude_rope_s:], k[:, :, num_k_exclude_rope_s:num_k_rope] = apply_rotary_enc(
+                q[:, :, num_q_exclude_rope_s:],
+                k[:, :, num_k_exclude_rope_s:num_k_rope],
                 self.freqs_cis,
                 repeat_freqs_k=self.rope_k_repeat,
             )

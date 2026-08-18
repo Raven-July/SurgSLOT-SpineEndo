@@ -116,6 +116,7 @@ class MaskDecoder(nn.Module):
         multimask_output: bool,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
+        memory_cls_tokens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
@@ -133,13 +134,14 @@ class MaskDecoder(nn.Module):
           torch.Tensor: batched predictions of mask quality
           torch.Tensor: batched SAM token for mask output
         """
-        masks, iou_pred, mask_tokens_out, object_score_logits = self.predict_masks(
+        masks, iou_pred, mask_tokens_out, object_score_logits, out_cls_tokens = self.predict_masks(
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
             dense_prompt_embeddings=dense_prompt_embeddings,
             repeat_image=repeat_image,
             high_res_features=high_res_features,
+            memory_cls_tokens=memory_cls_tokens,
         )
 
         # Select the correct mask or masks for output
@@ -163,7 +165,7 @@ class MaskDecoder(nn.Module):
             sam_tokens_out = mask_tokens_out[:, 0:1]  # [b, 1, c] shape
 
         # Prepare output
-        return masks, iou_pred, sam_tokens_out, object_score_logits
+        return masks, iou_pred, sam_tokens_out, object_score_logits, out_cls_tokens
 
     def predict_masks(
         self,
@@ -173,6 +175,7 @@ class MaskDecoder(nn.Module):
         dense_prompt_embeddings: torch.Tensor,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
+        memory_cls_tokens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details."""
         # Concatenate output tokens
@@ -195,6 +198,11 @@ class MaskDecoder(nn.Module):
             sparse_prompt_embeddings.size(0), -1, -1
         )
         tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
+        if memory_cls_tokens is not None:
+            memory_cls_tokens = memory_cls_tokens.transpose(0,1)  # [1, b, c] -> [b, 1, c] shape
+            # If memory_cls_tokens is provided, prepend it to the tokens
+            tokens = torch.cat((memory_cls_tokens, tokens), dim=1)
+            s += 1
 
         # Expand per-image data in batch direction to be per-mask
         if repeat_image:
@@ -236,13 +244,24 @@ class MaskDecoder(nn.Module):
         # Generate mask quality predictions
         iou_pred = self.iou_prediction_head(iou_token_out)
         if self.pred_obj_scores:
-            assert s == 1
-            object_score_logits = self.pred_obj_score_head(hs[:, 0, :])
+            if s == 1:
+                object_score_logits = self.pred_obj_score_head(hs[:, 0, :])
+                out_cls_tokens = None
+            elif s == 2:
+                object_score_logits = self.pred_obj_score_head(hs[:, 1, :])
+                out_cls_tokens = hs[:, :1, :].transpose(0, 1)
+            else:
+                raise ValueError(
+                    f"Unexpected number of output tokens: {s}. "
+                    "Expected 1 (object score) + 1 (iou token) + 3 (mask tokens) = 5."
+                )
+            # assert s == 1
+            # object_score_logits = self.pred_obj_score_head(hs[:, 0, :])
         else:
             # Obj scores logits - default to 10.0, i.e. assuming the object is present, sigmoid(10)=1
             object_score_logits = 10.0 * iou_pred.new_ones(iou_pred.shape[0], 1)
-
-        return masks, iou_pred, mask_tokens_out, object_score_logits
+            out_cls_tokens = hs[:, :1, :].transpose(0, 1) if memory_cls_tokens is not None else None
+        return masks, iou_pred, mask_tokens_out, object_score_logits, out_cls_tokens
 
     def _get_stability_scores(self, mask_logits):
         """

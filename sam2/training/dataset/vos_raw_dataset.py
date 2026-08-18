@@ -5,11 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import glob
+import json
 import logging
 import os
 from dataclasses import dataclass
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -40,6 +41,7 @@ class VOSVideo:
     video_name: str
     video_id: int
     frames: List[VOSFrame]
+    meta_annotation: Optional[Dict] = None
 
     def __len__(self):
         return len(self.frames)
@@ -58,6 +60,7 @@ class PNGRawDataset(VOSRawDataset):
         self,
         img_folder,
         gt_folder,
+        meta_folder=None,
         file_list_txt=None,
         excluded_videos_list_txt=None,
         sample_rate=1,
@@ -68,6 +71,7 @@ class PNGRawDataset(VOSRawDataset):
     ):
         self.img_folder = img_folder
         self.gt_folder = gt_folder
+        self.meta_folder = meta_folder
         self.sample_rate = sample_rate
         self.is_palette = is_palette
         self.single_object_mode = single_object_mode
@@ -138,7 +142,12 @@ class PNGRawDataset(VOSRawDataset):
         for _, fpath in enumerate(all_frames[:: self.sample_rate]):
             fid = int(os.path.basename(fpath).split(".")[0])
             frames.append(VOSFrame(fid, image_path=fpath))
-        video = VOSVideo(video_name, idx, frames)
+        meta_annotation = None
+        if self.meta_folder is not None:
+            meta_path = os.path.join(self.meta_folder, video_name + ".json")
+            with g_pathmgr.open(meta_path, "r") as f:
+                meta_annotation = json.load(f)
+        video = VOSVideo(video_name, idx, frames, meta_annotation=meta_annotation)
         return video, segment_loader
 
     def __len__(self):

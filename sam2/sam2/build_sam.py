@@ -141,6 +141,81 @@ def build_sam2_video_predictor(
     return model
 
 
+def build_surgslot_video_predictor(
+    config_file,
+    ckpt_path=None,
+    device="cuda",
+    mode="eval",
+    hydra_overrides_extra=None,
+    apply_postprocessing=False,
+    apply_long_mem=True,
+    num_long_mem_frame=3,
+    num_long_mem_candidate=5,
+    long_mem_iou_thr=0.9,
+    use_cls_inference=True,
+    use_continuous_divemem=True,
+    proto_update_thr=0.9,
+    ema_alpha_proto=0.95,
+    short_mem_frames=6,
+    strict_loading=True,
+):
+    """Build a SurgSLOT video predictor for evaluation."""
+    hydra_overrides = [
+        "++model._target_=sam2.surgslot_video_predictor.SurgSLOTVideoPredictor",
+    ]
+    if hydra_overrides_extra is not None:
+        hydra_overrides.extend(hydra_overrides_extra)
+
+    if apply_postprocessing:
+        hydra_overrides.extend(
+            [
+                "++model.sam_mask_decoder_extra_args.dynamic_multimask_via_stability=true",
+                "++model.sam_mask_decoder_extra_args.dynamic_multimask_stability_delta=0.05",
+                "++model.sam_mask_decoder_extra_args.dynamic_multimask_stability_thresh=0.98",
+                "++model.binarize_mask_from_pts_for_mem_enc=true",
+                "++model.fill_hole_area=8",
+            ]
+        )
+
+    if apply_long_mem:
+        hydra_overrides.extend(
+            [
+                "++model.use_long_term_memory=true",
+                "++model.use_iou_to_find_long_mem=true",
+                "++model.use_long_mem_tpos_enc=true",
+                f"++model.num_long_mem_frame={num_long_mem_frame}",
+                f"++model.num_long_mem_candidate={num_long_mem_candidate}",
+                f"++model.long_mem_iou_thr={long_mem_iou_thr}",
+                f"++model.proto_update_thr={proto_update_thr}",
+                f"++model.ema_alpha_proto={ema_alpha_proto}",
+            ]
+        )
+    else:
+        hydra_overrides.extend(
+            [
+                "++model.use_long_term_memory=false",
+                "++model.use_iou_to_find_long_mem=false",
+                "++model.use_long_mem_tpos_enc=false",
+            ]
+        )
+
+    hydra_overrides.append(f"++model.use_cls_inference={str(use_cls_inference).lower()}")
+    hydra_overrides.append(
+        f"++model.use_continuous_divemem={str(use_continuous_divemem).lower()}"
+    )
+
+    hydra_overrides.append(f"++model.short_mem_frames={short_mem_frames}")
+
+    cfg = compose(config_name=config_file, overrides=hydra_overrides)
+    OmegaConf.resolve(cfg)
+    model = instantiate(cfg.model, _recursive_=True)
+    _load_checkpoint(model, ckpt_path, strict=strict_loading)
+    model = model.to(device)
+    if mode == "eval":
+        model.eval()
+    return model
+
+
 def _hf_download(model_id):
     from huggingface_hub import hf_hub_download
 
@@ -161,14 +236,19 @@ def build_sam2_video_predictor_hf(model_id, **kwargs):
     )
 
 
-def _load_checkpoint(model, ckpt_path):
+def _load_checkpoint(model, ckpt_path, strict=True):
     if ckpt_path is not None:
-        sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)["model"]
-        missing_keys, unexpected_keys = model.load_state_dict(sd)
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        sd = checkpoint.get("model", checkpoint)
+        missing_keys, unexpected_keys = model.load_state_dict(sd, strict=strict)
         if missing_keys:
-            logging.error(missing_keys)
-            raise RuntimeError()
+            log = logging.error if strict else logging.warning
+            log("Missing checkpoint keys: %s", missing_keys)
+            if strict:
+                raise RuntimeError()
         if unexpected_keys:
-            logging.error(unexpected_keys)
-            raise RuntimeError()
-        logging.info("Loaded checkpoint sucessfully")
+            log = logging.error if strict else logging.warning
+            log("Unexpected checkpoint keys: %s", unexpected_keys)
+            if strict:
+                raise RuntimeError()
+        logging.info("Loaded checkpoint successfully")

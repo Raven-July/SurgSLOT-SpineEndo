@@ -1096,6 +1096,7 @@ class SAM2VideoPredictorVOS(SAM2VideoPredictor):
             ious,
             sam_output_tokens,
             object_score_logits,
+            _,
         ) = self.sam_mask_decoder(
             image_embeddings=backbone_features,
             image_pe=image_pe,

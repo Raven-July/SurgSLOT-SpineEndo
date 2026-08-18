@@ -82,6 +82,7 @@ class VOSDataset(VisionDataset):
         """
         sampled_frames = sampled_frms_and_objs.frames
         sampled_object_ids = sampled_frms_and_objs.object_ids
+        sampled_category_ids = sampled_frms_and_objs.category_ids
 
         images = []
         rgb_images = load_images(sampled_frames)
@@ -126,6 +127,9 @@ class VOSDataset(VisionDataset):
             frames=images,
             video_id=video.video_id,
             size=(h, w),
+            category_ids=sampled_category_ids,
+            is_long_mem_batch=sampled_frms_and_objs.is_long_mem_batch,
+            num_long_mem_frames=sampled_frms_and_objs.num_long_mem_frames,
         )
 
     def __getitem__(self, idx):

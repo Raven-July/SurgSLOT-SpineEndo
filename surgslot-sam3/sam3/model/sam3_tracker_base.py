@@ -71,6 +71,12 @@ class Sam3TrackerBase(torch.nn.Module):
         use_memory_selection=False,
         # when using memory selection, the threshold to determine if the frame is good
         mf_threshold=0.01,
+        # whether to use a dedicated temporal positional encoding for conditioning frames
+        # (instead of reusing maskmem_tpos_enc[num_maskmem-1], the nearest-frame bucket)
+        use_long_mem_tpos_enc=False,
+        # whether to use a learnable semantic cls token attending through memory and mask decoder
+        use_cls_tokens=False,
+        prob_to_dropout_spatial_mem=0.0,
     ):
         super().__init__()
 
@@ -104,6 +110,20 @@ class Sam3TrackerBase(torch.nn.Module):
             torch.zeros(num_maskmem, 1, 1, self.mem_dim)
         )
         trunc_normal_(self.maskmem_tpos_enc, std=0.02)
+        self.use_long_mem_tpos_enc = use_long_mem_tpos_enc
+        if use_long_mem_tpos_enc:
+            self.long_mem_tpos_enc = torch.nn.Parameter(
+                torch.zeros(1, 1, 1, self.mem_dim)
+            )
+            trunc_normal_(self.long_mem_tpos_enc, std=0.02)
+
+        # Learnable semantic cls token: attends through memory attention and mask decoder
+        self.use_cls_tokens = use_cls_tokens
+        if use_cls_tokens:
+            self.cls_tokens = torch.nn.Parameter(torch.zeros(1, 1, self.hidden_dim))
+            trunc_normal_(self.cls_tokens, std=0.02)
+
+        self.prob_to_dropout_spatial_mem = prob_to_dropout_spatial_mem
 
         # a single token to indicate no memory embedding from previous frames
         self.no_mem_embed = torch.nn.Parameter(torch.zeros(1, 1, self.hidden_dim))
@@ -222,6 +242,7 @@ class Sam3TrackerBase(torch.nn.Module):
         high_res_features=None,
         multimask_output=False,
         gt_masks=None,
+        memory_cls_tokens=None,
     ):
         """
         Forward SAM prompt encoders and mask heads.
@@ -314,6 +335,7 @@ class Sam3TrackerBase(torch.nn.Module):
                 ious,
                 sam_output_tokens,
                 object_score_logits,
+                out_cls_tokens,
             ) = self.sam_mask_decoder(
                 image_embeddings=backbone_features,
                 image_pe=image_pe,
@@ -322,6 +344,7 @@ class Sam3TrackerBase(torch.nn.Module):
                 multimask_output=multimask_output,
                 repeat_image=False,  # the image is already batched
                 high_res_features=high_res_features,
+                memory_cls_tokens=memory_cls_tokens,
             )
         # Clone the output of sam_mask_decoder
         # to enable compilation
@@ -383,6 +406,7 @@ class Sam3TrackerBase(torch.nn.Module):
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            out_cls_tokens,
         )
 
     def _use_mask_as_output(self, backbone_features, high_res_features, mask_inputs):
@@ -406,12 +430,15 @@ class Sam3TrackerBase(torch.nn.Module):
         )
         # a dummy IoU prediction of all 1's under mask input
         ious = mask_inputs.new_ones(mask_inputs.size(0), 1).float()
+        B = mask_inputs.size(0)
+        memory_cls_tokens = self.cls_tokens.expand(-1, B, -1) if self.use_cls_tokens else None
         # produce an object pointer using the SAM decoder from the mask input
-        _, _, _, _, _, obj_ptr, _ = self._forward_sam_heads(
+        _, _, _, _, _, obj_ptr, _, out_cls_tokens = self._forward_sam_heads(
             backbone_features=backbone_features,
             mask_inputs=self.mask_downsample(mask_inputs_float),
             high_res_features=high_res_features,
             gt_masks=mask_inputs,
+            memory_cls_tokens=memory_cls_tokens,
         )
         # In this method, we are treating mask_input as output, e.g. using it directly to create spatial mem;
         # Below, we follow the same design axiom to use mask_input to decide if obj appears or not instead of relying
@@ -431,6 +458,7 @@ class Sam3TrackerBase(torch.nn.Module):
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            out_cls_tokens,
         )
 
     def forward(self, input: BatchedDatapoint, is_inference=False):
@@ -585,8 +613,10 @@ class Sam3TrackerBase(torch.nn.Module):
         if not is_init_cond_frame and use_prev_mem_frame:
             # Retrieve the memories encoded with the maskmem backbone
             to_cat_prompt, to_cat_prompt_mask, to_cat_prompt_pos_embed = [], [], []
-            # Add conditioning frames's output first (all cond frames have t_pos=0 for
-            # when getting temporal positional embedding below)
+            # Add conditioning frames first.
+            # With use_long_mem_tpos_enc: first cond frame gets t_pos=0 (short-term bucket),
+            # subsequent cond frames (long-mem init frames) get t_pos=-1,-2,... (long-term enc).
+            # Without use_long_mem_tpos_enc: all cond frames get t_pos=0.
             assert len(output_dict["cond_frame_outputs"]) > 0
             # Select a maximum number of temporally closest cond frames for cross attention
             cond_outputs = output_dict["cond_frame_outputs"]
@@ -596,10 +626,18 @@ class Sam3TrackerBase(torch.nn.Module):
                 self.max_cond_frames_in_attn,
                 keep_first_cond_frame=self.keep_first_cond_frame,
             )
-            t_pos_and_prevs = [
-                ((frame_idx - t) * tpos_sign_mul, out, True)
-                for t, out in selected_cond_outputs.items()
-            ]
+            if self.use_long_mem_tpos_enc:
+                # t_pos=0: first cond frame (reference) → maskmem_tpos_enc[num_maskmem-1]
+                # t_pos<0: subsequent long-mem cond frames → long_mem_tpos_enc[0]
+                t_pos_and_prevs = []
+                cond_t_pos = 0
+                for out in selected_cond_outputs.values():
+                    t_pos_and_prevs.append((cond_t_pos, out, True))
+                    cond_t_pos -= 1
+            else:
+                t_pos_and_prevs = [(0, out, True) for out in selected_cond_outputs.values()]
+            protected_spatial_mem_indices = []
+            first_cond_output = cond_outputs[min(cond_outputs)]
             # Add last (self.num_maskmem - 1) frames before current frame for non-conditioning memory
             # the earliest one has t_pos=1 and the latest one has t_pos=self.num_maskmem-1
             # We also allow taking the memory frame non-consecutively (with r>1), in which case
@@ -653,6 +691,8 @@ class Sam3TrackerBase(torch.nn.Module):
                     continue  # skip padding frames
                 # "maskmem_features" might have been offloaded to CPU in demo use cases,
                 # so we load it back to GPU (it's a no-op if it's already on GPU).
+                if prev is first_cond_output:
+                    protected_spatial_mem_indices.append(len(to_cat_prompt))
                 feats = prev["maskmem_features"].cuda(non_blocking=True)
                 seq_len = feats.shape[-2] * feats.shape[-1]
                 to_cat_prompt.append(feats.flatten(2).permute(2, 0, 1))
@@ -663,6 +703,7 @@ class Sam3TrackerBase(torch.nn.Module):
                 maskmem_enc = prev["maskmem_pos_enc"][-1].cuda()
                 maskmem_enc = maskmem_enc.flatten(2).permute(2, 0, 1)
 
+                # TODO: Determine why is_selected differs from the SAM2 implementation.
                 if (
                     is_selected_cond_frame
                     and getattr(self, "cond_frame_spatial_embedding", None) is not None
@@ -670,11 +711,17 @@ class Sam3TrackerBase(torch.nn.Module):
                     # add a spatial embedding for the conditioning frame
                     maskmem_enc = maskmem_enc + self.cond_frame_spatial_embedding
 
-                # Temporal positional encoding
-                t = t_pos if not is_selected_cond_frame else 0
-                maskmem_enc = (
-                    maskmem_enc + self.maskmem_tpos_enc[self.num_maskmem - t - 1]
-                )
+                # Temporal positional encoding — three cases:
+                #   t_pos < 0  (cond long-mem frame): long_mem_tpos_enc
+                #   t_pos = 0  (cond reference frame): maskmem_tpos_enc[num_maskmem-1]
+                #   t_pos >= 1 (short-term non-cond frame): maskmem_tpos_enc[num_maskmem-t_pos-1]
+                if is_selected_cond_frame and t_pos < 0:
+                    maskmem_enc = maskmem_enc + self.long_mem_tpos_enc[0]
+                else:
+                    t = t_pos if not is_selected_cond_frame else 0
+                    maskmem_enc = (
+                        maskmem_enc + self.maskmem_tpos_enc[self.num_maskmem - t - 1]
+                    )
                 to_cat_prompt_pos_embed.append(maskmem_enc)
 
             # Construct the list of past object pointers
@@ -688,6 +735,7 @@ class Sam3TrackerBase(torch.nn.Module):
                 keep = self.rng.choice(
                     range(len(to_cat_prompt)), num_spatial_mem_keep, replace=False
                 ).tolist()
+                keep = sorted(set(keep).union(protected_spatial_mem_indices))
                 to_cat_prompt = [to_cat_prompt[i] for i in keep]
                 to_cat_prompt_mask = [to_cat_prompt_mask[i] for i in keep]
                 to_cat_prompt_pos_embed = [to_cat_prompt_pos_embed[i] for i in keep]
@@ -768,12 +816,17 @@ class Sam3TrackerBase(torch.nn.Module):
             # directly add no-mem embedding (instead of using the transformer encoder)
             pix_feat_with_mem = current_vision_feats[-1] + self.no_mem_embed
             pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
-            return pix_feat_with_mem
+            # Init-cond: no memory attention, pass raw cls_tokens through unchanged
+            memory_cls_tokens = self.cls_tokens.expand(-1, B, -1) if self.use_cls_tokens else None
+            return pix_feat_with_mem, memory_cls_tokens
 
             # Use a dummy token on the first grame (to avoid emtpy memory input to tranformer encoder)
             to_cat_prompt = [self.no_mem_embed.expand(1, B, self.mem_dim)]
             to_cat_prompt_mask = [torch.zeros(B, 1, device=device, dtype=bool)]
             to_cat_prompt_pos_embed = [self.no_mem_pos_enc.expand(1, B, self.mem_dim)]
+
+        # Expand cls_tokens to current batch size
+        cls_tokens_input = self.cls_tokens.expand(-1, B, -1) if self.use_cls_tokens else None
 
         # Step 2: Concatenate the memories and forward through the transformer encoder
         prompt = torch.cat(to_cat_prompt, dim=0)
@@ -788,10 +841,12 @@ class Sam3TrackerBase(torch.nn.Module):
             prompt_key_padding_mask=prompt_mask,
             feat_sizes=feat_sizes,
             num_obj_ptr_tokens=num_obj_ptr_tokens,
+            cls_tokens=cls_tokens_input,
         )
+        memory_cls_tokens = encoder_out.get("memory_cls_tokens", None)
         # reshape the output (HW)BC => BCHW
         pix_feat_with_mem = encoder_out["memory"].permute(1, 2, 0).view(B, C, H, W)
-        return pix_feat_with_mem
+        return pix_feat_with_mem, memory_cls_tokens
 
     def _encode_new_memory(
         self,
@@ -960,14 +1015,14 @@ class Sam3TrackerBase(torch.nn.Module):
             high_res_features = None
         if mask_inputs is not None:
             # (see it as a GT mask) without using a SAM prompt encoder + mask decoder.
-            pix_feat = current_vision_feats[-1].permute(1, 2, 0)
-            pix_feat = pix_feat.view(-1, self.hidden_dim, *feat_sizes[-1])
+            pix_feat_with_mem = current_vision_feats[-1].permute(1, 2, 0)
+            pix_feat_with_mem = pix_feat_with_mem.view(-1, self.hidden_dim, *feat_sizes[-1])
             sam_outputs = self._use_mask_as_output(
-                pix_feat, high_res_features, mask_inputs
+                pix_feat_with_mem, high_res_features, mask_inputs
             )
         else:
             # fused the visual feature with previous memory features in the memory bank
-            pix_feat_with_mem = self._prepare_memory_conditioned_features(
+            pix_feat_with_mem, memory_cls_tokens = self._prepare_memory_conditioned_features(
                 frame_idx=frame_idx,
                 is_init_cond_frame=is_init_cond_frame,
                 current_vision_feats=current_vision_feats[-1:],
@@ -978,11 +1033,6 @@ class Sam3TrackerBase(torch.nn.Module):
                 track_in_reverse=track_in_reverse,
                 use_prev_mem_frame=use_prev_mem_frame,
             )
-            # apply SAM-style segmentation head
-            # here we might feed previously predicted low-res SAM mask logits into the SAM mask decoder,
-            # e.g. in demo where such logits come from earlier interaction instead of correction sampling
-            # (in this case, the SAM mask decoder should have `self.iter_use_prev_mask_pred=True`, and
-            # any `mask_inputs` shouldn't reach here as they are sent to _use_mask_as_output instead)
             if prev_sam_mask_logits is not None:
                 assert self.iter_use_prev_mask_pred
                 assert point_inputs is not None and mask_inputs is None
@@ -994,7 +1044,15 @@ class Sam3TrackerBase(torch.nn.Module):
                 mask_inputs=mask_inputs,
                 high_res_features=high_res_features,
                 multimask_output=multimask_output,
+                memory_cls_tokens=memory_cls_tokens,
             )
+        # Store intermediate outputs for training subclasses (popped by _sam3_track_step).
+        # Skipped during inference to avoid holding extra tensors across frames.
+        if self.training:
+            current_out["_pix_feat_with_mem"] = pix_feat_with_mem
+            current_out["_high_res_features"] = high_res_features
+            current_out["_sam_outputs"] = sam_outputs
+
         (
             _,
             high_res_multimasks,
@@ -1003,17 +1061,18 @@ class Sam3TrackerBase(torch.nn.Module):
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            out_cls_tokens,
         ) = sam_outputs
+        current_out["out_cls_tokens"] = out_cls_tokens
         # Use the final prediction (after all correction steps for output and eval)
         current_out["pred_masks"] = low_res_masks
         current_out["pred_masks_high_res"] = high_res_masks
         current_out["obj_ptr"] = obj_ptr
+        current_out["iou_score"] = ious.max(-1)[0]
         if self.use_memory_selection:
             current_out["object_score_logits"] = object_score_logits
-            iou_score = ious.max(-1)[0]
-            current_out["iou_score"] = iou_score
             current_out["eff_iou_score"] = self.cal_mem_score(
-                object_score_logits, iou_score
+                object_score_logits, current_out["iou_score"]
             )
         if not self.training:
             # Only add this in inference (to avoid unused param in activation checkpointing;
@@ -1056,8 +1115,8 @@ class Sam3TrackerBase(torch.nn.Module):
             if run_mem_encoder and self.num_maskmem > 0:
                 trimmed_out["maskmem_features"] = maskmem_features.cpu()
                 trimmed_out["maskmem_pos_enc"] = [x.cpu() for x in maskmem_pos_enc]
+            trimmed_out["iou_score"] = current_out["iou_score"].cpu()
             if self.use_memory_selection:
-                trimmed_out["iou_score"] = current_out["iou_score"].cpu()
                 trimmed_out["eff_iou_score"] = current_out["eff_iou_score"].cpu()
             current_out = trimmed_out
 

@@ -50,6 +50,9 @@ class BatchedVideoDatapoint:
     metadata: BatchedVideoMetaData
 
     dict_key: str
+    category_ids: Optional[torch.LongTensor] = None
+    is_long_mem_batch: Optional[torch.BoolTensor] = None
+    num_long_mem_frames: Optional[torch.LongTensor] = None
 
     def pin_memory(self, device=None):
         return self.apply(torch.Tensor.pin_memory, device=device)
@@ -109,6 +112,9 @@ class VideoDatapoint:
     frames: List[Frame]
     video_id: int
     size: Tuple[int, int]
+    category_ids: Optional[List[int]] = None
+    is_long_mem_batch: bool = False
+    num_long_mem_frames: int = 0
 
 
 def collate_fn(
@@ -134,10 +140,25 @@ def collate_fn(
     step_t_obj_to_frame_idx = [
         [] for _ in range(T)
     ]  # List to store frame indices for each time step
+    category_ids = []
+    long_mem_flags = []
+    long_mem_counts = []
 
     for video_idx, video in enumerate(batch):
         orig_video_id = video.video_id
         orig_frame_size = video.size
+        object_count = len(video.frames[0].objects)
+        video_category_ids = video.category_ids
+        if video_category_ids is None:
+            video_category_ids = [-1] * object_count
+        if len(video_category_ids) != object_count:
+            raise ValueError(
+                "category_ids must align with the sampled objects: "
+                f"got {len(video_category_ids)} labels for {object_count} objects"
+            )
+        category_ids.extend(video_category_ids)
+        long_mem_flags.append(bool(video.is_long_mem_batch))
+        long_mem_counts.append(int(video.num_long_mem_frames))
         for t, frame in enumerate(video.frames):
             objects = frame.objects
             for obj in objects:
@@ -166,6 +187,27 @@ def collate_fn(
     frame_orig_size = torch.stack(
         [torch.stack(id, dim=0) for id in step_t_frame_orig_size], dim=0
     )
+    if len(set(long_mem_flags)) != 1:
+        raise ValueError(
+            "A batch cannot mix vanilla and long-range clips because they use "
+            "different conditioning-frame semantics."
+        )
+    if len(set(long_mem_counts)) != 1:
+        raise ValueError(
+            "All clips in a batch must use the same long-memory block size."
+        )
+    category_ids = torch.tensor(category_ids, dtype=torch.int64)
+    if category_ids.numel() != obj_to_frame_idx.shape[1]:
+        raise ValueError(
+            "Collated category labels do not align with the object dimension"
+        )
+    category_ids = category_ids.unsqueeze(0).expand(T, -1).clone()
+    is_long_mem_batch = torch.full(
+        (T,), long_mem_flags[0], dtype=torch.bool
+    )
+    num_long_mem_frames = torch.full(
+        (T,), long_mem_counts[0], dtype=torch.int64
+    )
     return BatchedVideoDatapoint(
         img_batch=img_batch,
         obj_to_frame_idx=obj_to_frame_idx,
@@ -175,5 +217,8 @@ def collate_fn(
             frame_orig_size=frame_orig_size,
         ),
         dict_key=dict_key,
+        category_ids=category_ids,
+        is_long_mem_batch=is_long_mem_batch,
+        num_long_mem_frames=num_long_mem_frames,
         batch_size=[T],
     )

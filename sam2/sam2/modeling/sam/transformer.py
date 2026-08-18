@@ -14,6 +14,11 @@ from torch import nn, Tensor
 
 from sam2.modeling.position_encoding import apply_rotary_enc, compute_axial_cis
 from sam2.modeling.sam2_utils import MLP
+# from sam2.utils.misc import get_sdpa_settings
+
+# import warnings
+# warnings.simplefilter(action="ignore", category=FutureWarning)
+# OLD_GPU, USE_FLASH_ATTN, MATH_KERNEL_ON = get_sdpa_settings()
 
 
 class TwoWayTransformer(nn.Module):
@@ -240,13 +245,19 @@ class Attention(nn.Module):
 
         dropout_p = self.dropout_p if self.training else 0.0
         # Attention
+        # with torch.backends.cuda.sdp_kernel(
+        #     enable_flash=USE_FLASH_ATTN,
+        #     # if Flash attention kernel is off, then math kernel needs to be enabled
+        #     enable_math=(OLD_GPU and dropout_p > 0.0) or MATH_KERNEL_ON,
+        #     enable_mem_efficient=OLD_GPU,
+        # ):
+        #     out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
         out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
 
         out = self._recombine_heads(out)
         out = self.out_proj(out)
 
         return out
-
 
 class RoPEAttention(Attention):
     """Attention with rotary position encoding."""
@@ -273,7 +284,9 @@ class RoPEAttention(Attention):
         self.rope_k_repeat = rope_k_repeat
 
     def forward(
-        self, q: Tensor, k: Tensor, v: Tensor, num_k_exclude_rope: int = 0
+        self, q: Tensor, k: Tensor, v: Tensor,
+            num_k_exclude_rope_s: int = 0, num_k_exclude_rope_e: int = 0,
+            num_q_exclude_rope_s: int = 0,
     ) -> Tensor:
         # Input projections
         q = self.q_proj(q)
@@ -286,23 +299,36 @@ class RoPEAttention(Attention):
         v = self._separate_heads(v, self.num_heads)
 
         # Apply rotary position encoding
-        w = h = math.sqrt(q.shape[-2])
+        w = h = math.sqrt(q.shape[-2] - num_q_exclude_rope_s)
         self.freqs_cis = self.freqs_cis.to(q.device)
-        if self.freqs_cis.shape[0] != q.shape[-2]:
+        if self.freqs_cis.shape[0] != q.shape[-2] - num_q_exclude_rope_s:
             self.freqs_cis = self.compute_cis(end_x=w, end_y=h).to(q.device)
         if q.shape[-2] != k.shape[-2]:
             assert self.rope_k_repeat
 
-        num_k_rope = k.size(-2) - num_k_exclude_rope
-        q, k[:, :, :num_k_rope] = apply_rotary_enc(
-            q,
-            k[:, :, :num_k_rope],
-            freqs_cis=self.freqs_cis,
+        # num_k_rope = k.size(-2) - num_k_exclude_rope_e
+        # q, k[:, :, :num_k_rope] = apply_rotary_enc(
+        #     q,
+        #     k[:, :, :num_k_rope],
+        #     freqs_cis=self.freqs_cis,
+        #     repeat_freqs_k=self.rope_k_repeat,
+        # )
+        q[:, :, num_q_exclude_rope_s:], k[:, :, num_k_exclude_rope_s:k.size(-2)-num_k_exclude_rope_e] = apply_rotary_enc(
+            q[:, :, num_q_exclude_rope_s:],
+            k[:, :, num_k_exclude_rope_s:k.size(-2)-num_k_exclude_rope_e],
+            freqs_cis=self.freqs_cis,  # num_q_exclude_rope was already removed above.
             repeat_freqs_k=self.rope_k_repeat,
         )
 
         dropout_p = self.dropout_p if self.training else 0.0
         # Attention
+        # with torch.backends.cuda.sdp_kernel(
+        #     enable_flash=USE_FLASH_ATTN,
+        #     # if Flash attention kernel is off, then math kernel needs to be enabled
+        #     enable_math=(OLD_GPU and dropout_p > 0.0) or MATH_KERNEL_ON,
+        #     enable_mem_efficient=OLD_GPU,
+        # ):
+        #     out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
         out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
 
         out = self._recombine_heads(out)

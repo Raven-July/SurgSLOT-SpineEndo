@@ -69,7 +69,7 @@ class JSONSegmentLoader:
         # Decode the masks
         raw_segments = torch.from_numpy(mask_utils.decode(rle_mask_filtered)).permute(
             2, 0, 1
-        )  # （num_obj, h, w）
+        )  # (num_obj, h, w)
         segments = {}
         for obj_id in valid_objs_ids:
             if id_2_idx[obj_id] is None:

@@ -456,10 +456,16 @@ class Trainer:
 
         outputs = model(batch)
         targets = batch.masks
+        category_targets = batch.category_ids
         batch_size = len(batch.img_batch)
 
         key = batch.dict_key  # key for dataset
-        loss = self.loss[key](outputs, targets)
+        loss = self.loss[key](
+            outputs,
+            targets,
+            category_batch=category_targets,
+            epoch=self.epoch,
+        )
         loss_str = f"Losses/{phase}_{key}_loss"
 
         loss_log_str = os.path.join("Step_Losses", loss_str)

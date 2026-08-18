@@ -2,10 +2,19 @@
 
 # Model
 model:
-  _target_: sam2.modeling.surgslot_base.SurgSLOTBase
+  _target_: sam2.surgslot_video_predictor.SurgSLOTVideoPredictor
   use_cls_tokens: true
-  use_cls_pos_tokens: false
+  use_cls_inference: true
+  use_long_term_memory: true
+  use_iou_to_find_long_mem: true
   use_long_mem_tpos_enc: true
+  use_continuous_divemem: true
+  num_long_mem_frame: 3
+  num_long_mem_candidate: 5
+  long_mem_iou_thr: 0.9
+  proto_update_thr: 0.9
+  ema_alpha_proto: 0.95
+  short_mem_frames: 6
 
   image_encoder:
     _target_: sam2.modeling.backbones.image_encoder.ImageEncoder

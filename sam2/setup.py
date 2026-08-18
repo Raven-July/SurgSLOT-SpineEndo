@@ -61,6 +61,7 @@ EXTRA_PACKAGES = {
         "tensordict>=0.6.0",
         "opencv-python>=4.7.0",
         "submitit>=1.5.1",
+        "transformers>=4.46.0",
     ],
 }
 

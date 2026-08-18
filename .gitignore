@@ -19,8 +19,12 @@ wandb/
 tmp/
 
 # Data and model weights
-data/
-datasets/
+# Dataset payloads at the repository root or directly under a backbone.
+# Keep configuration groups such as sam2/.../configs/.../datasets tracked.
+/data/
+/datasets/
+/*/data/
+/*/datasets/
 checkpoints/*.pt
 checkpoints/*.pth
 checkpoints/*.ckpt

@@ -114,3 +114,59 @@ data:
     _partial_: true
     dict_key: all
 ```
+
+## SurgSLOT long-range training
+
+SurgSLOT alternates vanilla adjacent-frame video clips and long-range clips at
+a 1:1 ratio. A long-range clip contains a distant block followed by a recent
+block. The distant block includes the conditional frame, so the paper setting
+`S_d=3, S_r=7` is configured as:
+
+```yaml
+model:
+  _target_: training.model.surgslot.SurgSLOTTrain
+  use_cls_tokens: true
+  use_long_mem_tpos_enc: true
+  num_init_long_mem_frames: 2  # S_d - 1
+
+sampler:
+  _target_: training.dataset.vos_long_mem_sampler.LongRangeSampler
+  num_long_frames: 3           # S_d: conditional + two long memories
+  num_short_frames: 7          # S_r: recent consecutive frames
+  max_num_objects: 2
+  step_length: 1
+  reverse_time_prob: 0.25
+```
+
+Use the regular `training.dataset.vos_sampler.RandomUniformSampler` for the
+other half of video batches. Dataset metadata may be supplied with
+`PNGRawDataset.meta_folder`; each `<video>.json` should contain
+`info.category`, mapping object ids to the unified names in
+`training/utils/category_name_list.py`. Missing categories are assigned `-1`
+and ignored only by the vision-language term.
+
+The corresponding loss keeps the standard SAM2 objectives and adds temporal
+consistency, repulsion, and vision-language contrastive supervision:
+
+```yaml
+loss:
+  all:
+    _target_: training.loss_fns_slot.MultiStepMultiMasksAndIous
+    weight_dict:
+      loss_mask: 20
+      loss_dice: 1
+      loss_iou: 1
+      loss_class: 1
+      loss_cls: 1
+      loss_consistency: 1
+      loss_repulsion: 1
+    pred_obj_scores: true
+    use_cls_tokens: true
+    compute_consistency_loss: true
+    confidence_cls: 0.7
+    ema_alpha_proto: 0.95
+    vlc_temperature: 0.01
+    consistency_margin: 0.7
+    repulsion_iou_thr: 0.0
+    repulsion_margin: 0.0
+```

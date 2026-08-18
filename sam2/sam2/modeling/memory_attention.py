@@ -55,19 +55,28 @@ class MemoryAttentionLayer(nn.Module):
         self.pos_enc_at_cross_attn_queries = pos_enc_at_cross_attn_queries
         self.pos_enc_at_cross_attn_keys = pos_enc_at_cross_attn_keys
 
-    def _forward_sa(self, tgt, query_pos):
+    def _forward_sa(self, tgt, query_pos, num_q_exclude_rope_s=0, num_k_exclude_rope_s=0):
+        kwds = {}
+        if num_q_exclude_rope_s > 0:
+            assert isinstance(self.self_attn, RoPEAttention)
+            kwds["num_q_exclude_rope_s"] = num_q_exclude_rope_s
+            kwds["num_k_exclude_rope_s"] = num_k_exclude_rope_s
+            assert num_q_exclude_rope_s == num_k_exclude_rope_s, "num_q_exclude_rope_s and num_k_exclude_rope_s must be equal"
         # Self-Attention
         tgt2 = self.norm1(tgt)
         q = k = tgt2 + query_pos if self.pos_enc_at_attn else tgt2
-        tgt2 = self.self_attn(q, k, v=tgt2)
+        tgt2 = self.self_attn(q, k, v=tgt2, **kwds)
         tgt = tgt + self.dropout1(tgt2)
         return tgt
 
-    def _forward_ca(self, tgt, memory, query_pos, pos, num_k_exclude_rope=0):
+    def _forward_ca(self, tgt, memory, query_pos, pos, num_k_exclude_rope_e=0, num_q_exclude_rope_s=0):
         kwds = {}
-        if num_k_exclude_rope > 0:
+        if num_k_exclude_rope_e > 0 or num_q_exclude_rope_s > 0:
             assert isinstance(self.cross_attn_image, RoPEAttention)
-            kwds = {"num_k_exclude_rope": num_k_exclude_rope}
+            kwds = {
+                "num_k_exclude_rope_e": num_k_exclude_rope_e,
+                "num_q_exclude_rope_s": num_q_exclude_rope_s,
+            }
 
         # Cross-Attention
         tgt2 = self.norm2(tgt)
@@ -86,12 +95,20 @@ class MemoryAttentionLayer(nn.Module):
         memory,
         pos: Optional[Tensor] = None,
         query_pos: Optional[Tensor] = None,
-        num_k_exclude_rope: int = 0,
+        num_q_exclude_rope_s: int = 0,  # Number of tokens to exclude from RoPE in queries
+        num_k_exclude_rope_s: int = 0,  # Number of tokens to exclude from RoPE in keys, starting from the first token
+        num_k_exclude_rope_e: int = 0,  # Number of tokens to exclude from RoPE in keys, starting from the end token
     ) -> torch.Tensor:
 
         # Self-Attn, Cross-Attn
-        tgt = self._forward_sa(tgt, query_pos)
-        tgt = self._forward_ca(tgt, memory, query_pos, pos, num_k_exclude_rope)
+        tgt = self._forward_sa(
+            tgt, query_pos,
+            num_q_exclude_rope_s=num_q_exclude_rope_s, num_k_exclude_rope_s=num_k_exclude_rope_s
+        )
+        tgt = self._forward_ca(
+            tgt, memory, query_pos, pos,
+            num_q_exclude_rope_s=num_q_exclude_rope_s, num_k_exclude_rope_e=num_k_exclude_rope_e
+        )
         # MLP
         tgt2 = self.norm3(tgt)
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
@@ -123,6 +140,7 @@ class MemoryAttention(nn.Module):
         curr_pos: Optional[Tensor] = None,  # pos_enc for self-attention inputs
         memory_pos: Optional[Tensor] = None,  # pos_enc for cross-attention inputs
         num_obj_ptr_tokens: int = 0,  # number of object pointer *tokens*
+        cls_tokens: Optional[torch.Tensor] = None,  # cls token for memory
     ):
         if isinstance(curr, list):
             assert isinstance(curr_pos, list)
@@ -137,6 +155,14 @@ class MemoryAttention(nn.Module):
         ), "Batch size must be the same for curr and memory"
 
         output = curr
+
+        memory_cls_tokens = None
+        if cls_tokens is not None:
+            # Prepend the semantic query to the current-frame tokens.
+            output = torch.cat([cls_tokens, curr], dim=0)
+            zero_pos = torch.zeros_like(curr_pos[:1, :, :])
+            curr_pos = torch.cat([zero_pos, curr_pos], dim=0)
+
         if self.pos_enc_at_input and curr_pos is not None:
             output = output + 0.1 * curr_pos
 
@@ -150,7 +176,10 @@ class MemoryAttention(nn.Module):
         for layer in self.layers:
             kwds = {}
             if isinstance(layer.cross_attn_image, RoPEAttention):
-                kwds = {"num_k_exclude_rope": num_obj_ptr_tokens}
+                kwds = {"num_k_exclude_rope_e": num_obj_ptr_tokens}
+                if cls_tokens is not None:
+                    kwds["num_q_exclude_rope_s"] = 1
+                    kwds["num_k_exclude_rope_s"] = 1
 
             output = layer(
                 tgt=output,
@@ -166,4 +195,10 @@ class MemoryAttention(nn.Module):
             normed_output = normed_output.transpose(0, 1)
             curr_pos = curr_pos.transpose(0, 1)
 
-        return normed_output
+        if cls_tokens is not None:
+            # Remove the cls token from the output
+            memory_cls_tokens = normed_output[:1, :, :]
+            normed_output = normed_output[1:, :, :]
+
+        # Always return a pair so SAM2 and SurgSLOT share one stable interface.
+        return normed_output, memory_cls_tokens
