@@ -1,19 +1,19 @@
 # @package _global_
 
 defaults:
-  - datasets/surgslot_train_512
+  - datasets/surgslot_sam2_sasv
   - _self_
 
 scratch:
   resolution: 512
-  train_batch_size: 4
+  train_batch_size: 5
   num_train_workers: 2
   num_frames: 10
-  max_num_objects: 2
+  max_num_objects: 1
   base_lr: 1.0e-5
   vision_lr: 1.0e-5
   phases_per_epoch: 1
-  num_epochs: 1
+  num_epochs: 30
   freeze_image_encoder: false
   use_tissue_text: false
   cls_pretrained_epoch: 0
@@ -21,9 +21,9 @@ scratch:
 
 launcher:
   num_nodes: 1
-  gpus_per_node: 1
+  gpus_per_node: 4
   experiment_log_dir: null # Path to log directory, defaults to ./sam2_logs/${config_name}
-  find_gpu_memory: 48500
+  find_gpu_memory: 0
 
 
 # Video transforms

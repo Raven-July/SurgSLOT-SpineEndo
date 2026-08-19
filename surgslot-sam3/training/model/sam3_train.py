@@ -340,14 +340,19 @@ class SAM3Train(Sam3TrackerBase):
         backbone_out["use_pt_input"] = use_pt_input
 
         if num_init_cond_frames == 1:
-            if self.num_init_long_mem_frames > 0 and is_long_mem_batch and self.rng.random() < 0.5:
-                # Add consecutive long-mem frames as extra conditioning frames
-                init_cond_frames = [
-                    start_frame_idx + t
-                    for t in range(num_init_cond_frames + self.num_init_long_mem_frames)
-                ]
+            if not is_long_mem_batch:
+                init_cond_frames = [start_frame_idx]  # starting frame
             else:
-                init_cond_frames = [start_frame_idx]
+                # The distant block is ordered as [conditional, long memories].
+                # All long-memory frames are initialized from GT-derived points,
+                # as described by SurgSLOT long-range sampling.
+                end = start_frame_idx + 1 + self.num_init_long_mem_frames
+                if end > num_frames:
+                    raise ValueError(
+                        "Long-range clip has fewer distant frames than configured: "
+                        f"need {1 + self.num_init_long_mem_frames}, got {num_frames}."
+                    )
+                init_cond_frames = list(range(start_frame_idx, end))
         else:
             init_cond_frames = [start_frame_idx] + self.rng.choice(
                 range(start_frame_idx + 1, num_frames),
@@ -888,7 +893,7 @@ def build_sam3_predictor(
     apply_long_mem: bool = False,
     num_long_mem_frame: int = 3,
     num_long_mem_candidate: int = 5,
-    long_mem_iou_thr: float = 0.95,
+    long_mem_confidence_thr: float = 0.95,
     use_cls_inference: bool = False,
     use_cls_mem_attn: bool = False,
     use_long_mem_tpos_enc: bool = False,
@@ -901,7 +906,7 @@ def build_sam3_predictor(
 ):
     """
     Build Sam3TrackerPredictor with the same architecture as SAM3Train and load
-    a fine-tuned checkpoint. Use this for inference with vos_inference.py.
+    a fine-tuned checkpoint. Use this for inference with vos_inference_surgslot.py.
     """
     from sam3.model.sam3_tracking_predictor import Sam3TrackerPredictor
 
@@ -933,7 +938,7 @@ def build_sam3_predictor(
         apply_long_mem=apply_long_mem,
         num_long_mem_frame=num_long_mem_frame,
         num_long_mem_candidate=num_long_mem_candidate,
-        long_mem_iou_thr=long_mem_iou_thr,
+        long_mem_confidence_thr=long_mem_confidence_thr,
         use_cls_inference=use_cls_inference,
         use_long_mem_tpos_enc=use_long_mem_tpos_enc,
         use_continuous_divemem=use_continuous_divemem,
@@ -965,7 +970,7 @@ def build_sam3_predictor(
         f"apply_long_mem={apply_long_mem}, "
         f"num_long_mem_frame={num_long_mem_frame}, "
         f"num_long_mem_candidate={num_long_mem_candidate}, "
-        f"long_mem_iou_thr={long_mem_iou_thr}, "
+        f"long_mem_confidence_thr={long_mem_confidence_thr}, "
         f"use_cls_inference={use_cls_inference}, "
         f"use_continuous_divemem={use_continuous_divemem}, "
         f"proto_update_thr={proto_update_thr}, "

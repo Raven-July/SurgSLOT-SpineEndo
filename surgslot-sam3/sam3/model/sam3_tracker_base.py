@@ -1177,7 +1177,9 @@ class Sam3TrackerBase(torch.nn.Module):
         keep only the highest scoring object at each spatial location in pred_masks.
         """
         batch_size = pred_masks.size(0)
-        if batch_size == 1:
+        if batch_size <= 1:
+            # No overlap to resolve: batch_size == 0 (no objects tracked in this
+            # frame/video) or batch_size == 1 (a single object).
             return pred_masks
 
         device = pred_masks.device

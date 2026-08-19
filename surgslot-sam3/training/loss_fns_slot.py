@@ -140,9 +140,9 @@ class MultiStepMultiMasksAndIous(nn.Module):
         confidence_cls=0.5,
         ema_alpha_proto=0.95,
         compute_consistency_loss=False,
-        repulsion_iou_thr=0.1,
-        repulsion_margin=0.1,
-        consistency_margin=0.5,
+        repulsion_iou_thr=0.0,
+        repulsion_margin=0.0,
+        consistency_margin=0.7,
     ):
         """
         This class computes the multi-step multi-mask and IoU losses.
@@ -252,7 +252,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         # GT IoU: measures whether the model truly segmented the correct object
         best_gt_iou = self._compute_best_gt_iou(src_masks, targets.unsqueeze(1).float())  # [B]
 
-        attract_gate   = best_gt_iou >= self.confidence_cls
+        attract_gate   = best_gt_iou > self.confidence_cls
         repulsion_gate = best_gt_iou <= self.repulsion_iou_thr
 
         # Consistency loss — attract high-IoU frames toward prototype

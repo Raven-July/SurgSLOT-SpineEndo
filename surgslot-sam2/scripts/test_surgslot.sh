@@ -7,37 +7,32 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-GPU_ID="${GPU_ID:-0}"
-SAM2_CFG="${SAM2_CFG:-configs/surgslot/surgslot_hiera_b+_512.yaml}"
+SAM2_CFG="${SAM2_CFG:-configs/surgslot-sam2/surgslot_hiera_b+_512.yaml}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-checkpoints/surgslot-sam2_hiera_b+.pt}"
 DATA_ROOT="${DATA_ROOT:-./data}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs/surgslot-sam2}"
 NUM_PROCESSES="${NUM_PROCESSES:-4}"
 
-LONG_MEM="${LONG_MEM:-1}"
-USE_CLS_INFERENCE="${USE_CLS_INFERENCE:-1}"
-USE_CONTINUOUS_DIVEMEM="${USE_CONTINUOUS_DIVEMEM:-1}"
-APPLY_POSTPROCESSING="${APPLY_POSTPROCESSING:-0}"
-KEEP_VIDEO_ON_GPU="${KEEP_VIDEO_ON_GPU:-0}"
+# GPU selection, long-term memory toggles, and all SLM thresholds
+# (num_long_mem_frame, num_long_mem_candidate, long_mem_confidence_thr,
+# proto_update_thr, ema_alpha_proto, short_term_frame_num) are left unset
+# here because they already equal tools/vos_inference_surgslot.py's own
+# defaults, which are the paper's settings. Pass extra CLI flags after
+# `--` to override any of them, e.g. `bash scripts/test_surgslot.sh --gpu_id 1`.
 DEBUG_LONG_MEM="${DEBUG_LONG_MEM:-0}"
-
-NUM_LONG_MEM_FRAMES="${NUM_LONG_MEM_FRAMES:-3}"
-NUM_LONG_MEM_CANDIDATES="${NUM_LONG_MEM_CANDIDATES:-5}"
-LONG_MEM_IOU_THR="${LONG_MEM_IOU_THR:-0.9}"
-PROTO_UPDATE_THR="${PROTO_UPDATE_THR:-0.9}"
-EMA_ALPHA_PROTO="${EMA_ALPHA_PROTO:-0.95}"
-SHORT_MEM_FRAMES="${SHORT_MEM_FRAMES:-6}"
 
 # Datasets used by the original SurgSLOT/SAM2 evaluation scripts.
 # Set DATASETS to a space-separated subset when running only selected datasets.
 DATASET_LIST=(
-  "VOS-Endovis17"
-  "VOS-Endovis18"
-  "SurgicalAI3K"
-  "polypgen"
-  "Hyst-YT"
-  "RARP50"
-  "NUH-Hyst"
+  "VOS-Endovis17_demo"
+  "VOS-Endovis18_demo"
+#  "VOS-Endovis17"
+#  "VOS-Endovis18"
+#  "SurgicalAI3K"
+#  "polypgen"
+#  "Hyst-YT"
+#  "RARP50"
+#  "NUH-Hyst"
 )
 if [[ -n "${DATASETS:-}" ]]; then
   read -r -a DATASET_LIST <<< "${DATASETS}"
@@ -58,13 +53,20 @@ if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
 fi
 
 if [[ ! -f "${SAM2_CFG}" ]]; then
-  echo "Model configuration not found: ${SAM2_CFG}" >&2
+  # Hydra receives a package-relative config name (configs/...), while the
+  # physical YAML lives below the sam2 Python package directory.
+  SAM2_CFG_FILE="sam2/${SAM2_CFG}"
+else
+  SAM2_CFG_FILE="${SAM2_CFG}"
+fi
+if [[ ! -f "${SAM2_CFG_FILE}" ]]; then
+  echo "Model configuration not found: ${SAM2_CFG_FILE}" >&2
   exit 1
 fi
 
 if [[ ! -d "${DATA_ROOT}" ]]; then
   echo "Dataset root not found: ${DATA_ROOT}" >&2
-  echo "Create sam2/data as a directory or symbolic link, or set DATA_ROOT." >&2
+  echo "Create data as a directory or symbolic link, or set DATA_ROOT." >&2
   exit 1
 fi
 
@@ -81,38 +83,10 @@ fi
 COMMON_ARGS=(
   --sam2_cfg "${SAM2_CFG}"
   --sam2_checkpoint "${CHECKPOINT_PATH}"
-  --gpu_id "${GPU_ID}"
-  --num_long_mem_frame "${NUM_LONG_MEM_FRAMES}"
-  --num_long_mem_candidate "${NUM_LONG_MEM_CANDIDATES}"
-  --long_mem_iou_thr "${LONG_MEM_IOU_THR}"
-  --proto_update_thr "${PROTO_UPDATE_THR}"
-  --ema_alpha_proto "${EMA_ALPHA_PROTO}"
-  --short_term_frame_num "${SHORT_MEM_FRAMES}"
   --num_processes "${NUM_PROCESSES}"
   --use_all_masks
 )
 
-if [[ "${LONG_MEM}" == "1" ]]; then
-  COMMON_ARGS+=(--apply_long_mem)
-else
-  COMMON_ARGS+=(--no-apply_long_mem)
-fi
-if [[ "${USE_CLS_INFERENCE}" == "1" ]]; then
-  COMMON_ARGS+=(--use_cls_inference)
-else
-  COMMON_ARGS+=(--no-use_cls_inference)
-fi
-if [[ "${USE_CONTINUOUS_DIVEMEM}" == "1" ]]; then
-  COMMON_ARGS+=(--use_continuous_divemem)
-else
-  COMMON_ARGS+=(--no-use_continuous_divemem)
-fi
-if [[ "${APPLY_POSTPROCESSING}" == "1" ]]; then
-  COMMON_ARGS+=(--apply_postprocessing)
-fi
-if [[ "${KEEP_VIDEO_ON_GPU}" == "1" ]]; then
-  COMMON_ARGS+=(--keep_video_on_gpu)
-fi
 if [[ "${DEBUG_LONG_MEM}" == "1" ]]; then
   COMMON_ARGS+=(--debug_long_mem)
 fi
@@ -129,7 +103,9 @@ for prompt_config in "${PROMPT_CONFIGS[@]}"; do
     gt_root="${DATA_ROOT}/${dataset_name}/test/masks"
     output_mask_dir="${OUTPUT_DIR}/${dataset_name}/${prompt_dir}${RUN_NAME_SUFFIX}"
     benchmark_type="generic"
-    if [[ "${dataset_name}" == "VOS-Endovis18" ]]; then
+    # Prefix match so demo/renamed variants (e.g. VOS-Endovis18_demo) also
+    # get the EndoVis18 instrument/tissue-split evaluation protocol.
+    if [[ "${dataset_name}" == VOS-Endovis18* ]]; then
       benchmark_type="endovis2018"
     fi
 

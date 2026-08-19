@@ -44,7 +44,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         apply_long_mem=False,
         num_long_mem_frame=3,
         num_long_mem_candidate=5,
-        long_mem_iou_thr=0.95,
+        long_mem_confidence_thr=0.95,
         use_cls_inference=False,
         use_continuous_divemem=False,
         proto_update_thr=0.95,
@@ -67,7 +67,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         # kwargs.setdefault("max_obj_ptrs_in_encoder", num_long_mem_candidate)
         # kwargs.setdefault("memory_temporal_stride_for_eval", memory_stride)
         # kwargs.setdefault("use_memory_selection", apply_long_mem)
-        # kwargs.setdefault("mf_threshold", long_mem_iou_thr)
+        # kwargs.setdefault("mf_threshold", long_mem_confidence_thr)
         kwargs.setdefault("use_cls_tokens", use_cls_inference or apply_long_mem)
 
         super().__init__(**kwargs)
@@ -83,7 +83,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         self.use_short_memory_selection = False
         self.num_long_mem_frame = num_long_mem_frame
         self.num_long_mem_candidate = num_long_mem_candidate
-        self.long_mem_iou_thr = long_mem_iou_thr
+        self.long_mem_confidence_thr = long_mem_confidence_thr
         self.use_cls_inference = use_cls_inference
         self.use_continuous_divemem = use_continuous_divemem
         self.proto_update_thr = proto_update_thr
@@ -1186,7 +1186,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
             prev_confidence = self._output_confidence(prev_output)
             if prev_confidence is None:
                 return
-            if prev_confidence > self.long_mem_iou_thr:
+            if prev_confidence > self.long_mem_confidence_thr:
                 output_dict["long_mem_candidate"].append(
                     (prev_frame_idx, prev_confidence.detach())
                 )

@@ -503,7 +503,7 @@ def main():
         default=5,
     )
     parser.add_argument(
-        "--long_mem_iou_thr",
+        "--long_mem_confidence_thr",
         type=float,
         default=0.9,
     )
@@ -549,7 +549,7 @@ def main():
     parser.add_argument(
         "--training_config_file",
         type=str,
-        default="configs/sam3_surgslot/surgslot_sam3_sasv",
+        default="configs/surgslot-sam3_training/surgslot_sam3_sasv",
         help="training config identifier used by the paper model",
     )
     parser.add_argument(
@@ -621,7 +621,7 @@ def main():
         apply_long_mem=args.apply_long_mem,
         num_long_mem_frame=args.num_long_mem_frame,
         num_long_mem_candidate=args.num_long_mem_candidate,
-        long_mem_iou_thr=args.long_mem_iou_thr,
+        long_mem_confidence_thr=args.long_mem_confidence_thr,
         use_cls_inference=args.use_cls_inference,
         use_long_mem_tpos_enc=args.use_long_mem_tpos_enc,
         use_cls_mem_attn=args.use_cls_mem_attn,

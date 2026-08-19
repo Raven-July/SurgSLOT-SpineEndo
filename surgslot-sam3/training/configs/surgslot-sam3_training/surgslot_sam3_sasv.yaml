@@ -6,14 +6,14 @@ defaults:
 
 scratch:
   resolution: 672
-  train_batch_size: 4
+  train_batch_size: 5
   num_train_workers: 10
   num_frames: 10
-  max_num_objects: 2
+  max_num_objects: 1
   base_lr: 1.0e-5
-  vision_lr: 5.0e-6
+  vision_lr: 1.0e-5
   phases_per_epoch: 1
-  num_epochs: 60
+  num_epochs: 30
   use_tissue_text: false
   cls_pretrained_epoch: 0
   compute_consistency_loss: true   # more params specify in the loss config section
@@ -22,16 +22,15 @@ scratch:
   num_init_long_mem_frames: 2
 
 paths:
-#  checkpoint: ${oc.env:SAM3_CHECKPOINT,./checkpoints/sam3.pt}
-  checkpoint: /mnt/data0/haofeng/project/SurgicalSAM3/checkpoints/sam3.pt
+  checkpoint: ${oc.env:SAM3_CHECKPOINT,./checkpoints/sam3.pt}
 
 launcher:
   num_nodes: 1
-  gpus_per_node: 1
+  gpus_per_node: 4
   # Use the GPUs exposed through CUDA_VISIBLE_DEVICES. Automatic free-memory
   # polling is disabled because it can wait forever on 48 GB cards.
-  find_gpu_memory: 40000
-  experiment_log_dir: ${oc.env:SURGSLOT_TRAIN_OUTPUT,./outputs/surgslot-sam3/train/surgslot_sam3_sasv}
+  find_gpu_memory: 0
+  experiment_log_dir: ${oc.env:SURGSLOT_TRAIN_OUTPUT,./sam3_logs/surgslot_sam3_sasv}
 
 vos:
   train_transforms:
@@ -201,8 +200,8 @@ trainer:
         loss_cls: 1
         loss_consistency: 1
         loss_repulsion: 1
-      repulsion_iou_thr: 0.1
-      repulsion_margin: 0.1
+      repulsion_iou_thr: 0.0
+      repulsion_margin: 0.0
       consistency_margin: 0.7
       confidence_cls: 0.7
       compute_consistency_loss: ${scratch.compute_consistency_loss}

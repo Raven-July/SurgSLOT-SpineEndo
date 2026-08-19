@@ -387,7 +387,7 @@ def main():
     parser.add_argument(
         "--sam2_cfg",
         type=str,
-        default="configs/surgslot/surgslot_hiera_b+_512.yaml",
+        default="configs/surgslot-sam2/surgslot_hiera_b+_512.yaml",
         help="SurgSLOT model configuration file",
     )
     parser.add_argument(
@@ -475,7 +475,7 @@ def main():
         default=5,
     )
     parser.add_argument(
-        "--long_mem_iou_thr",
+        "--long_mem_confidence_thr",
         type=float,
         default=0.9,
     )
@@ -569,7 +569,7 @@ def main():
         apply_long_mem=args.apply_long_mem,
         num_long_mem_frame=args.num_long_mem_frame,
         num_long_mem_candidate=args.num_long_mem_candidate,
-        long_mem_iou_thr=args.long_mem_iou_thr,
+        long_mem_confidence_thr=args.long_mem_confidence_thr,
         hydra_overrides_extra=[],
         strict_loading=False,
         use_cls_inference=args.use_cls_inference,

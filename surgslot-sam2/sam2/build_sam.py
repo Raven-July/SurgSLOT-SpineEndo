@@ -151,7 +151,7 @@ def build_surgslot_video_predictor(
     apply_long_mem=True,
     num_long_mem_frame=3,
     num_long_mem_candidate=5,
-    long_mem_iou_thr=0.9,
+    long_mem_confidence_thr=0.9,
     use_cls_inference=True,
     use_continuous_divemem=True,
     proto_update_thr=0.9,
@@ -190,7 +190,7 @@ def build_surgslot_video_predictor(
                 "++model.use_long_mem_tpos_enc=true",
                 f"++model.num_long_mem_frame={num_long_mem_frame}",
                 f"++model.num_long_mem_candidate={num_long_mem_candidate}",
-                f"++model.long_mem_iou_thr={long_mem_iou_thr}",
+                f"++model.long_mem_confidence_thr={long_mem_confidence_thr}",
                 f"++model.proto_update_thr={proto_update_thr}",
                 f"++model.ema_alpha_proto={ema_alpha_proto}",
             ]

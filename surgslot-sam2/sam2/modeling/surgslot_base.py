@@ -482,7 +482,6 @@ class SurgSLOTBase(torch.nn.Module):
             mode="bilinear",
             antialias=True,  # use antialias for downsampling
         )
-        # TODO: Determine whether out_cls_tokens should be added here, as in SAM2.
         # It is currently None, but a token may be needed for category recognition.
         # a dummy IoU prediction of all 1's under mask input
         ious = mask_inputs.new_ones(mask_inputs.size(0), 1).float()
@@ -632,7 +631,6 @@ class SurgSLOTBase(torch.nn.Module):
             assert len(output_dict["cond_frame_outputs"]) > 0
             # Select a maximum number of temporally closest cond frames for cross attention
             cond_outputs = output_dict["cond_frame_outputs"]
-            # TODO: Set max_cond_frames_in_attn to 1 + long_mem_frames. Assign position
             # zero to the first selected frame and long-memory positions to the rest.
             selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames(
                 frame_idx, cond_outputs, self.max_cond_frames_in_attn
@@ -783,7 +781,6 @@ class SurgSLOTBase(torch.nn.Module):
                 # directly add no-mem embedding (instead of using the transformer encoder)
                 pix_feat_with_mem = current_vision_feats[-1] + self.no_mem_embed
                 pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
-                # TODO: This is the first-frame feature and has not been memory-conditioned.
                 # repeat self.cls_tokens in Batch size if cls_tokens are used
                 memory_cls_tokens = self.cls_tokens.expand(-1, B, -1) if self.use_cls_tokens else None
                 return pix_feat_with_mem, memory_cls_tokens
@@ -1042,7 +1039,9 @@ class SurgSLOTBase(torch.nn.Module):
         keep only the highest scoring object at each spatial location in pred_masks.
         """
         batch_size = pred_masks.size(0)
-        if batch_size == 1:
+        if batch_size <= 1:
+            # No overlap to resolve: batch_size == 0 (no objects tracked in this
+            # frame/video) or batch_size == 1 (a single object).
             return pred_masks
 
         device = pred_masks.device

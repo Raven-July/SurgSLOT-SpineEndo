@@ -76,6 +76,8 @@ train = [
     "fairscale",
     "scikit-image",
     "scikit-learn",
+    "transformers>=4.46.0",
+    "GPUtil>=1.4.0",
 ]
 
 [project.urls]

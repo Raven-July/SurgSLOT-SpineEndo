@@ -38,7 +38,7 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
         use_long_term_memory=True,
         num_long_mem_frame=3,
         num_long_mem_candidate=5,
-        long_mem_iou_thr=0.9,
+        long_mem_confidence_thr=0.9,
         use_iou_to_find_long_mem=True,
         use_cls_inference=True,
         use_continuous_divemem=True,
@@ -60,7 +60,7 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
         self.use_long_term_memory = use_long_term_memory
         self.num_long_mem_frame = num_long_mem_frame
         self.num_long_mem_candidate = num_long_mem_candidate
-        self.long_mem_iou_thr = long_mem_iou_thr
+        self.long_mem_confidence_thr = long_mem_confidence_thr
         self.use_iou_to_find_long_mem = use_iou_to_find_long_mem
         self.use_cls_inference = use_cls_inference
         self.use_continuous_divemem = use_continuous_divemem
@@ -68,12 +68,12 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
         self.ema_alpha_proto = ema_alpha_proto
         self.short_mem_frames = short_mem_frames
         self.debug_long_mem = debug_long_mem
-        if use_long_term_memory and use_iou_to_find_long_mem and proto_update_thr > long_mem_iou_thr:
+        if use_long_term_memory and use_iou_to_find_long_mem and proto_update_thr > long_mem_confidence_thr:
             warnings.warn(
-                f"proto_update_thr ({proto_update_thr}) > long_mem_iou_thr ({long_mem_iou_thr}): "
+                f"proto_update_thr ({proto_update_thr}) > long_mem_confidence_thr ({long_mem_confidence_thr}): "
                 f"a frame can enter the candidate pool without initializing the prototype, "
                 f"which may trigger the assert in _prepare_memory_conditioned_features. "
-                f"Set proto_update_thr <= long_mem_iou_thr to avoid this."
+                f"Set proto_update_thr <= long_mem_confidence_thr to avoid this."
             )
 
     @torch.inference_mode()
@@ -860,7 +860,7 @@ class SurgSLOTVideoPredictor(SurgSLOTBase):
                             prev_confidence = prev_obj_score_logits.sigmoid().mean() * prev_iou
                         else:
                             prev_confidence = prev_iou
-                        if prev_confidence > self.long_mem_iou_thr:
+                        if prev_confidence > self.long_mem_confidence_thr:
                             output_dict["long_mem_candidate"].append((prev_frame_idx, prev_confidence))
                         elif self.use_continuous_divemem:
                             output_dict["long_mem_candidate"].clear()

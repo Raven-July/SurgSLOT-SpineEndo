@@ -22,7 +22,35 @@ from omegaconf import OmegaConf
 
 from training.utils.train_utils import makedir, register_omegaconf_resolvers
 
+import time
+
 os.environ["HYDRA_FULL_ERROR"] = "1"
+
+
+def find_gpus(memory=45000, sleep_time=20, gpu_num=1):
+    try:
+        import GPUtil
+    except ImportError as error:
+        raise RuntimeError(
+            "Automatic GPU memory polling requires GPUtil. Either install "
+            "GPUtil or set launcher.find_gpu_memory to 0 and select GPUs "
+            "with CUDA_VISIBLE_DEVICES."
+        ) from error
+
+    print(f'Looking for {gpu_num} GPU(s) with at least {memory} MB free memory')
+    while True:
+        gpus = GPUtil.getGPUs()
+        available_gpus = []
+        for gpu in gpus:
+            if gpu.memoryFree > memory:
+                available_gpus.append(gpu.id)
+        if len(available_gpus) >= gpu_num:
+            selected_gpus = available_gpus[:gpu_num]
+            print(f'Found GPU(s): {selected_gpus}')
+            return selected_gpus
+        else:
+            print(f'Only {len(available_gpus)}/{gpu_num} GPU(s) available, waiting...')
+            time.sleep(sleep_time)
 
 
 def single_proc_run(local_rank, main_port, cfg, world_size):
@@ -50,8 +78,17 @@ def single_node_runner(cfg, main_port: int):
     if num_proc == 1:
         # directly call single_proc so we can easily set breakpoints
         # mp.spawn does not let us set breakpoints
-        single_proc_run(local_rank=0, main_port=main_port, cfg=cfg, world_size=num_proc)
+        local_rank = 0
+        if hasattr(cfg.launcher, 'find_gpu_memory') and cfg.launcher.find_gpu_memory > 0:
+            gpu_ids = find_gpus(cfg.launcher.find_gpu_memory, gpu_num=cfg.launcher.gpus_per_node)
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
+            os.environ["NCCL_P2P_DISABLE"] = "1"
+        single_proc_run(local_rank=local_rank, main_port=main_port, cfg=cfg, world_size=num_proc)
     else:
+        if hasattr(cfg.launcher, 'find_gpu_memory') and cfg.launcher.find_gpu_memory > 0:
+            gpu_ids = find_gpus(cfg.launcher.find_gpu_memory, gpu_num=cfg.launcher.gpus_per_node)
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
+            os.environ["NCCL_P2P_DISABLE"] = "1"
         mp_runner = torch.multiprocessing.start_processes
         args = (main_port, cfg, num_proc)
         # Note: using "fork" below, "spawn" causes time and error regressions. Using

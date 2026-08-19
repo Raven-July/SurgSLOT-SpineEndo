@@ -1324,7 +1324,7 @@ def build_surgslot_sam3_predictor(
     apply_long_mem: bool = True,
     num_long_mem_frame: int = 3,
     num_long_mem_candidate: int = 5,
-    long_mem_iou_thr: float = 0.9,
+    long_mem_confidence_thr: float = 0.9,
     use_cls_inference: bool = True,
     use_cls_mem_attn: bool = False,
     use_long_mem_tpos_enc: bool = True,
@@ -1333,7 +1333,7 @@ def build_surgslot_sam3_predictor(
     ema_alpha_proto: float = 0.95,
     short_mem_frames: int = 6,
     memory_stride: int = 1,
-    training_config_file: str = "configs/sam3_surgslot/surgslot_sam3_sasv",
+    training_config_file: str = "configs/surgslot-sam3_training/surgslot_sam3_sasv",
     debug_long_mem: bool = False,
 ):
     """Build the SurgSLOT VOS predictor with the paper's evaluation defaults."""
@@ -1367,7 +1367,7 @@ def build_surgslot_sam3_predictor(
         apply_long_mem=apply_long_mem,
         num_long_mem_frame=num_long_mem_frame,
         num_long_mem_candidate=num_long_mem_candidate,
-        long_mem_iou_thr=long_mem_iou_thr,
+        long_mem_confidence_thr=long_mem_confidence_thr,
         use_cls_inference=use_cls_inference,
         use_long_mem_tpos_enc=use_long_mem_tpos_enc,
         use_continuous_divemem=use_continuous_divemem,
@@ -1400,7 +1400,7 @@ def build_surgslot_sam3_predictor(
         f"apply_long_mem={apply_long_mem}, "
         f"num_long_mem_frame={num_long_mem_frame}, "
         f"num_long_mem_candidate={num_long_mem_candidate}, "
-        f"long_mem_iou_thr={long_mem_iou_thr}, "
+        f"long_mem_confidence_thr={long_mem_confidence_thr}, "
         f"use_cls_inference={use_cls_inference}, "
         f"use_continuous_divemem={use_continuous_divemem}, "
         f"proto_update_thr={proto_update_thr}, "

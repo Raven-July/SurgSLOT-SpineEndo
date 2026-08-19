@@ -195,7 +195,7 @@ def main(args) -> None:
     cfg = compose(config_name=args.config)
     if cfg.launcher.experiment_log_dir is None:
         cfg.launcher.experiment_log_dir = os.path.join(
-            os.getcwd(), "outputs", "surgslot-sam3", "train", args.config
+            os.getcwd(), "sam3_logs", args.config
         )
     print("###################### Train App Config ####################")
     print(OmegaConf.to_yaml(cfg))

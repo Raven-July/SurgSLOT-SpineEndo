@@ -11,7 +11,7 @@ model:
   use_continuous_divemem: true
   num_long_mem_frame: 3
   num_long_mem_candidate: 5
-  long_mem_iou_thr: 0.9
+  long_mem_confidence_thr: 0.9
   proto_update_thr: 0.9
   ema_alpha_proto: 0.95
   short_mem_frames: 6

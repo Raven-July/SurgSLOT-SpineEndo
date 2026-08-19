@@ -513,7 +513,6 @@ class SurgSLOTTrain(SurgSLOTBase):
         # Optionally, sample correction points iteratively to correct the mask
         if frame_idx in frames_to_add_correction_pt:
             # Add only a few points to long-memory frames; currently three points.
-            # TODO: The number of points may need adjustment.
             if (
                 len(frames_to_add_correction_pt) > 1
                 and frame_idx != frames_to_add_correction_pt[0]
