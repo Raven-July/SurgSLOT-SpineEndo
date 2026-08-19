@@ -1,0 +1,72 @@
+SurgSLOT
+Copyright 2025 SurgSLOT Authors
+
+This repository is a multi-license repository. See LICENSE for the root
+Apache License 2.0 text. This NOTICE file summarizes directory-level
+licensing and third-party attribution.
+
+## Directory-level license map
+
+- Root repository (this file, README.md, and any SurgSLOT-specific code or
+  documentation outside `surgslot-sam2/` and `surgslot-sam3/`): Apache
+  License 2.0 (see LICENSE).
+- `surgslot-sam2/`: based on Meta's SAM 2 (https://github.com/facebookresearch/sam2),
+  Apache License 2.0 (see surgslot-sam2/LICENSE). Additional third-party
+  terms apply to specific files/subdirectories:
+  - surgslot-sam2/LICENSE_cctorch (cc_torch)
+  - surgslot-sam2/sav_dataset/LICENSE (SA-V dataset utilities)
+  - surgslot-sam2/sav_dataset/LICENSE_DAVIS (DAVIS evaluation code)
+  - surgslot-sam2/sav_dataset/LICENSE_VOS_BENCHMARK (VOS benchmark code)
+- `surgslot-sam3/`: based on Meta's SAM 3 (https://github.com/facebookresearch/sam3),
+  governed by the SAM License (see surgslot-sam3/LICENSE), not by the root
+  Apache-2.0 license. Redistributing this directory requires including a
+  copy of the SAM License.
+- Model checkpoints are distributed separately from this repository's
+  source code (`HeverLaw/SurgSLOT`, https://huggingface.co/HeverLaw/SurgSLOT)
+  under Creative Commons Attribution-NonCommercial-NoDerivatives 4.0
+  (CC BY-NC-ND 4.0, https://creativecommons.org/licenses/by-nc-nd/4.0/):
+  non-commercial research use only, no redistribution of modified
+  versions. The SurgSLOT-SAM2 checkpoint is fine-tuned from Meta's
+  Apache-2.0-licensed SAM 2, and the SurgSLOT-SAM3 checkpoint is
+  fine-tuned from Meta's SAM 3, governed by the SAM License; using either
+  checkpoint may also carry additional terms from its underlying backbone.
+
+## Third-party attribution
+
+This work builds on:
+- SAM 2 (Meta AI) — https://github.com/facebookresearch/sam2
+- SAM 3 (Meta AI) — https://github.com/facebookresearch/sam3
+- CLIP (OpenAI) — https://github.com/openai/CLIP
+
+The SAM2 evaluation utilities include code adapted from the DAVIS
+evaluation and VOS benchmark projects; see the license files listed above
+under `surgslot-sam2/sav_dataset/`.
+
+## Dataset attribution and licensing
+
+- **iSurg benchmark.** iSurg consolidates data from multiple public
+  surgical datasets plus one in-house dataset (NUH-Hyst, collected with
+  support from National University Hospital, Singapore). iSurg is **not
+  redistributed** by this repository; each source dataset must be obtained
+  from its official provider under that provider's own license and access
+  terms. See README.md "Data Preparation" for the expected local layout.
+
+- **SurgSLOT-demo dataset.** A small demo subset (`HeverLaw/SurgSLOT-demo`,
+  https://huggingface.co/datasets/HeverLaw/SurgSLOT-demo) is provided for
+  quick testing without the full iSurg download. It is released under
+  Creative Commons Attribution-NonCommercial-NoDerivatives 4.0
+  (CC BY-NC-ND 4.0, https://creativecommons.org/licenses/by-nc-nd/4.0/):
+  non-commercial research use only, no redistribution of modified
+  versions. This demo subset is derived from the EndoVis17 and EndoVis18
+  challenge datasets (M. Allan, "2017 Robotic Instrument Segmentation
+  Challenge," arXiv:1902.06426; "2018 Robotic Scene Segmentation
+  Challenge," arXiv:2001.11190); using it also requires complying with
+  the original EndoVis data usage terms
+  (https://endovissub2017-roboticinstrumentsegmentation.grand-challenge.org/,
+  https://endovissub2018-roboticscenesegmentation.grand-challenge.org/).
+  The CC BY-NC-ND 4.0 license governs SurgSLOT's own redistribution of
+  this derived subset and does not by itself waive or supersede any
+  obligation under the original EndoVis terms.
+
+This repository is provided for research purposes and is not a clinically
+validated medical device.
