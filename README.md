@@ -14,6 +14,8 @@ Official implementation of **SurgSLOT**, a promptable surgical video segmentatio
 
 > [SurgSLOT: Segment Anything in Surgical Videos via Semantic Long-term Tracking](https://arxiv.org/abs/2511.16618)
 
+This work was previously released under the name **SAM2S**; the [`jinlab-imvr/SAM2S`](https://github.com/jinlab-imvr/SAM2S) repository now points here.
+
 ## Overview
 
 Interactive video object segmentation can generalize to new surgical centers, procedures, and object categories without retraining: a user specifies the target with a first-frame visual prompt, and the model tracks that target throughout the video. Long surgical videos remain difficult, however, because instruments and tissues may disappear for extended periods and later reappear near visually similar distractors.
