@@ -154,7 +154,7 @@ Large model weights are not committed to Git. Both SurgSLOT checkpoints are host
 | Model | Backbone | Configuration | Checkpoint |
 |---|---|---|---|
 | SurgSLOT-SAM2 | SAM 2.1 Hiera B+ | [`surgslot_hiera_b+_512.yaml`](surgslot-sam2/sam2/configs/surgslot-sam2/surgslot_hiera_b+_512.yaml) | `checkpoints/surgslot-sam2_hiera_b+.pt` |
-| SurgSLOT-SAM3 | SAM 3 | [`surgslot_sam3_sasv.yaml`](surgslot-sam3/training/configs/surgslot-sam3_training/surgslot_sam3_sasv.yaml) | `checkpoints/surgslot-sam3_hiera_b+.pt` |
+| SurgSLOT-SAM3 | SAM 3 | [`surgslot_sam3_sasv.yaml`](surgslot-sam3/training/configs/surgslot-sam3_training/surgslot_sam3_sasv.yaml) | `checkpoints/surgslot-sam3_iSurg.pt` |
 
 Download them directly into each backbone's `checkpoints/` directory (filenames already match what the scripts expect, so no renaming is needed):
 
@@ -162,8 +162,8 @@ Download them directly into each backbone's `checkpoints/` directory (filenames 
 mkdir -p surgslot-sam2/checkpoints surgslot-sam3/checkpoints
 curl -L -o surgslot-sam2/checkpoints/surgslot-sam2_hiera_b+.pt \
   https://huggingface.co/HeverLaw/SurgSLOT/resolve/main/surgslot-sam2_hiera_b+.pt
-curl -L -o surgslot-sam3/checkpoints/surgslot-sam3_hiera_b+.pt \
-  https://huggingface.co/HeverLaw/SurgSLOT/resolve/main/surgslot-sam3_hiera_b+.pt
+curl -L -o surgslot-sam3/checkpoints/surgslot-sam3_iSurg.pt \
+  https://huggingface.co/HeverLaw/SurgSLOT/resolve/main/surgslot-sam3_iSurg.pt
 ```
 
 Or pass their paths through the environment variables shown below instead of placing them under `checkpoints/`.
@@ -178,10 +178,9 @@ For SAM3, set `SAM3_CHECKPOINT` to the official SAM3 backbone checkpoint when tr
 
 ```bash
 export SAM3_CHECKPOINT=/path/to/sam3.pt
-export CHECKPOINT_PATH=/path/to/surgslot-sam3_hiera_b+.pt
+export CHECKPOINT_PATH=/path/to/surgslot-sam3_iSurg.pt
 ```
 
-## Data Preparation
 
 The benchmark code expects the following layout for each evaluation dataset:
 
@@ -272,7 +271,7 @@ Run from `SurgSLOT/surgslot-sam3`. Long-term memory and all SLM settings default
 
 ```bash
 python tools/vos_inference_surgslot.py \
-  --sam3_checkpoint checkpoints/surgslot-sam3_hiera_b+.pt \
+  --sam3_checkpoint checkpoints/surgslot-sam3_iSurg.pt \
   --base_video_dir ./data/VOS-Endovis17/test/images \
   --input_mask_dir ./data/VOS-Endovis17/test/vos/Annotations \
   --output_mask_dir ./outputs/VOS-Endovis17/point_3 \
@@ -283,7 +282,7 @@ python tools/vos_inference_surgslot.py \
 To run the full benchmark, use the shell script from `SurgSLOT/surgslot-sam3`:
 
 ```bash
-CHECKPOINT_PATH=/path/to/surgslot-sam3_hiera_b+.pt \
+CHECKPOINT_PATH=/path/to/surgslot-sam3_iSurg.pt \
 DATA_ROOT=/path/to/isurg/data \
 OUTPUT_DIR=./outputs/surgslot-sam3 \
 GPU_ID=0 \

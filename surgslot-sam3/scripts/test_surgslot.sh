@@ -8,7 +8,7 @@ cd "${PROJECT_ROOT}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 GPU_ID="${GPU_ID:-0}"
-DEFAULT_CHECKPOINT_PATH="checkpoints/surgslot-sam3_hiera_b+.pt"
+DEFAULT_CHECKPOINT_PATH="checkpoints/surgslot-sam3_iSurg.pt"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-${DEFAULT_CHECKPOINT_PATH}}"
 DATA_ROOT="${DATA_ROOT:-./data}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs/surgslot-sam3}"
