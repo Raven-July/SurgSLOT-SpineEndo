@@ -3,5 +3,5 @@ scikit-image
 opencv-python
 tqdm
 pillow
-numpy
+numpy>=1.26,<2
 matplotlib
